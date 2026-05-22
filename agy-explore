@@ -1,0 +1,383 @@
+#!/usr/bin/env python3
+import json
+import os
+import sys
+from datetime import datetime
+
+# ANSI Escape Codes for Beautiful Terminal Output
+CLR_RESET = "\033[0m"
+CLR_BOLD = "\033[1m"
+CLR_DIM = "\033[2m"
+CLR_RED = "\033[31m"
+CLR_GREEN = "\033[32m"
+CLR_YELLOW = "\033[33m"
+CLR_BLUE = "\033[34m"
+CLR_MAGENTA = "\033[35m"
+CLR_CYAN = "\033[36m"
+CLR_WHITE = "\033[37m"
+
+BASE_DIR = "/home/dpavlin/.gemini/antigravity-cli"
+
+def print_help():
+    print(f"{CLR_BOLD}Explore Conversation Transcripts & Manage Sessions{CLR_RESET}")
+    print("Usage:")
+    print("  agy-explore                       # List all conversations with details")
+    print("  agy-explore <conversation_id>     # Print full conversation log")
+    print("  agy-explore --restore <conv_id>   # Make a conversation active in its workspace")
+    print("  agy-explore <path_to_jsonl_file>  # Print specific JSONL file")
+    print("\nOptions:")
+    print("  --no-color     Disable ANSI color codes")
+    print("  --no-thoughts  Exclude internal assistant thinking processes")
+    print("  --no-tools     Exclude tool call/output logs")
+    print("\nExamples:")
+    print("  agy-explore 4ba35ed8-5ef9-497c-b6d9-1a6cb3e11056 | less -R")
+    sys.exit(0)
+
+def load_workspace_mappings():
+    """Reads history.jsonl to build a conversation-to-workspace mapping."""
+    history_path = os.path.join(BASE_DIR, "history.jsonl")
+    mappings = {}
+    if not os.path.exists(history_path):
+        return mappings
+        
+    try:
+        with open(history_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                    cid = data.get("conversationId")
+                    workspace = data.get("workspace")
+                    if cid and workspace:
+                        mappings[cid] = workspace
+                except Exception:
+                    continue
+    except Exception as e:
+        print(f"[!] Warning: failed to load workspace mappings: {e}")
+    return mappings
+
+def format_duration(seconds):
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{int(minutes)}m {int(seconds % 60)}s"
+    hours = minutes / 60
+    if hours < 24:
+        return f"{int(hours)}h {int(minutes % 60)}m"
+    days = hours / 24
+    return f"{int(days)}d {int(hours % 24)}h"
+
+def list_conversations():
+    brain_dir = os.path.join(BASE_DIR, "brain")
+    if not os.path.isdir(brain_dir):
+        print(f"{CLR_RED}[-] Brain directory not found at {brain_dir}{CLR_RESET}")
+        return
+    
+    dirs = []
+    for entry in os.listdir(brain_dir):
+        full_path = os.path.join(brain_dir, entry)
+        if os.path.isdir(full_path):
+            dirs.append(entry)
+            
+    workspace_mappings = load_workspace_mappings()
+    
+    conversations = []
+    
+    print(f"[*] Analyzing {len(dirs)} conversation log(s) from brain store...")
+    
+    for uuid_str in dirs:
+        log_path = os.path.join(brain_dir, uuid_str, ".system_generated", "logs", "transcript.jsonl")
+        if not os.path.exists(log_path):
+            continue
+            
+        mtime = os.path.getmtime(log_path)
+        mtime_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
+        
+        first_prompt = "N/A"
+        last_prompt = "N/A"
+        start_time = None
+        end_time = None
+        
+        tool_call_count = 0
+        thought_count = 0
+        total_steps = 0
+        
+        try:
+            with open(log_path, "r", encoding="utf-8") as f:
+                lines = [line.strip() for line in f if line.strip()]
+                total_steps = len(lines)
+                
+                for idx, line in enumerate(lines):
+                    data = json.loads(line)
+                    created_at_str = data.get("created_at")
+                    
+                    # Convert created_at to timestamp
+                    t_val = None
+                    if created_at_str and created_at_str != "N/A":
+                        try:
+                            # Strip Z or +00:00 for simple parsing
+                            clean_t = created_at_str.replace("Z", "").split("+")[0]
+                            t_val = datetime.fromisoformat(clean_t)
+                        except Exception:
+                            pass
+                            
+                    if t_val:
+                        if start_time is None or t_val < start_time:
+                            start_time = t_val
+                        if end_time is None or t_val > end_time:
+                            end_time = t_val
+                            
+                    source = data.get("source")
+                    step_type = data.get("type")
+                    content = data.get("content", "")
+                    
+                    # Track statistics
+                    if data.get("thinking"):
+                        thought_count += 1
+                    if data.get("tool_calls"):
+                        tool_call_count += len(data.get("tool_calls"))
+                    elif step_type in ["RUN_COMMAND", "VIEW_FILE", "LIST_DIRECTORY", "GREP_SEARCH", "COMMAND_OUTPUT"]:
+                        tool_call_count += 1
+                        
+                    if source == "USER_EXPLICIT" and step_type == "USER_INPUT":
+                        clean_content = content
+                        if "<USER_REQUEST>" in content:
+                            clean_content = content.split("<USER_REQUEST>")[-1].split("</USER_REQUEST>")[0].strip()
+                        
+                        clean_content = clean_content.replace("\n", " ").strip()
+                        if len(clean_content) > 60:
+                            clean_content = clean_content[:57] + "..."
+                            
+                        if first_prompt == "N/A":
+                            first_prompt = clean_content
+                        last_prompt = clean_content
+                        
+        except Exception as e:
+            print(f"[!] Error processing {uuid_str}: {e}")
+            
+        duration_str = "N/A"
+        if start_time and end_time:
+            diff_sec = (end_time - start_time).total_seconds()
+            duration_str = format_duration(diff_sec)
+            
+        workspace = workspace_mappings.get(uuid_str, "Unknown Workspace")
+        
+        conversations.append({
+            "uuid": uuid_str,
+            "mtime": mtime,
+            "mtime_str": mtime_str,
+            "first_prompt": first_prompt,
+            "last_prompt": last_prompt,
+            "duration": duration_str,
+            "total_steps": total_steps,
+            "tool_calls": tool_call_count,
+            "thoughts": thought_count,
+            "workspace": workspace
+        })
+        
+    # Sort by mtime descending
+    conversations.sort(key=lambda x: x["mtime"], reverse=True)
+    
+    for idx, c in enumerate(conversations, 1):
+        print(f"\n{CLR_BOLD}{CLR_BLUE}================================================================================{CLR_RESET}")
+        print(f"{CLR_BOLD}{CLR_GREEN}[#{idx}] Conversation ID: {c['uuid']}{CLR_RESET}")
+        print(f"{CLR_BOLD}{CLR_BLUE}================================================================================{CLR_RESET}")
+        print(f"  {CLR_BOLD}Project Directory:{CLR_RESET} {CLR_CYAN}{c['workspace']}{CLR_RESET}")
+        print(f"  {CLR_BOLD}Active Duration:  {CLR_RESET} {c['duration']} (Last Activity: {c['mtime_str']})")
+        print(f"  {CLR_BOLD}Statistics:       {CLR_RESET} {c['total_steps']} total steps | {c['tool_calls']} tool calls executed | {c['thoughts']} reasoning cycles")
+        print(f"  {CLR_BOLD}First Prompt:     {CLR_RESET} {CLR_WHITE}\"{c['first_prompt']}\"{CLR_RESET}")
+        print(f"  {CLR_BOLD}Last Prompt:      {CLR_RESET} {CLR_WHITE}\"{c['last_prompt']}\"{CLR_RESET}")
+        
+        # Output restore command instructions
+        if c['workspace'] != "Unknown Workspace":
+            restore_cmd = f"cd {c['workspace']} && agy --conversation {c['uuid']}"
+            print(f"  {CLR_BOLD}{CLR_YELLOW}Restore Active Pointer Command:{CLR_RESET} agy-explore --restore {c['uuid']}")
+            print(f"  {CLR_BOLD}{CLR_YELLOW}Resume CLI Interface Command:  {CLR_RESET} {CLR_BOLD}{restore_cmd}{CLR_RESET}")
+        else:
+            print(f"  {CLR_BOLD}{CLR_YELLOW}Restore Active Pointer Command:{CLR_RESET} agy-explore --restore {c['uuid']}")
+            print(f"  {CLR_BOLD}{CLR_YELLOW}Resume CLI Interface Command:  {CLR_RESET} agy --conversation {c['uuid']}")
+            
+    print("\n" + "="*80 + "\n")
+
+def restore_conversation(conv_id):
+    """Restores the given conversation ID to its associated workspace in the last_conversations cache."""
+    brain_dir = os.path.join(BASE_DIR, "brain", conv_id)
+    if not os.path.isdir(brain_dir):
+        print(f"{CLR_RED}[- ] Error: conversation ID {conv_id} does not exist in brain store.{CLR_RESET}")
+        sys.exit(1)
+        
+    workspace_mappings = load_workspace_mappings()
+    workspace = workspace_mappings.get(conv_id)
+    
+    if not workspace:
+        # Let's fallback to search inside the transcript log for project path or user path
+        log_path = os.path.join(brain_dir, ".system_generated", "logs", "transcript.jsonl")
+        if os.path.exists(log_path):
+            try:
+                with open(log_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if not line.strip():
+                            continue
+                        data = json.loads(line)
+                        content = data.get("content", "")
+                        if "Workspace:" in content or "active workspaces" in content:
+                            # Try simple extraction
+                            match = re.search(r"Workspace:\s*([^\n\r]+)", content)
+                            if match:
+                                workspace = match.group(1).strip()
+                                break
+            except Exception:
+                pass
+                
+    if not workspace:
+        # Default fallback to home or ask user
+        workspace = "/home/dpavlin"
+        print(f"{CLR_YELLOW}[!] Warning: Workspace not mapped in logs. Defaulting pointer to {workspace}.{CLR_RESET}")
+        
+    cache_path = os.path.join(BASE_DIR, "cache", "last_conversations.json")
+    cache_data = {}
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                cache_data = json.load(f)
+        except Exception as e:
+            print(f"[!] Warning: failed to parse cache: {e}")
+            
+    cache_data[workspace] = conv_id
+    
+    try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(cache_data, f, indent=2)
+        print(f"{CLR_GREEN}[+] Success: Conversation {conv_id} has been marked active for workspace '{workspace}'.{CLR_RESET}")
+        print(f"{CLR_BOLD}To resume the CLI session, run the following commands:{CLR_RESET}")
+        print(f"  {CLR_CYAN}cd {workspace}{CLR_RESET}")
+        print(f"  {CLR_CYAN}agy --conversation {conv_id}{CLR_RESET}")
+    except Exception as e:
+        print(f"{CLR_RED}[-] Failed to update last_conversations cache: {e}{CLR_RESET}")
+        sys.exit(1)
+
+def render_transcript(file_path, use_color=True, show_thoughts=True, show_tools=True):
+    if not use_color:
+        global CLR_RESET, CLR_BOLD, CLR_DIM, CLR_RED, CLR_GREEN, CLR_YELLOW, CLR_BLUE, CLR_MAGENTA, CLR_CYAN, CLR_WHITE
+        CLR_RESET = CLR_BOLD = CLR_DIM = CLR_RED = CLR_GREEN = CLR_YELLOW = CLR_BLUE = CLR_MAGENTA = CLR_CYAN = CLR_WHITE = ""
+        
+    print(f"{CLR_BOLD}{CLR_CYAN}[*] Streaming transcript: {file_path}{CLR_RESET}\n")
+    
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line_num, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                step = json.loads(line)
+            except json.JSONDecodeError as e:
+                print(f"{CLR_RED}[!] JSON decode error at line {line_num}: {e}{CLR_RESET}")
+                continue
+                
+            source = step.get("source")
+            step_type = step.get("type")
+            time = step.get("created_at", "N/A")
+            content = step.get("content", "").strip()
+            thinking = step.get("thinking", "").strip()
+            tool_calls = step.get("tool_calls", [])
+            
+            if source == "USER_EXPLICIT" and step_type == "USER_INPUT":
+                req = content
+                if "<USER_REQUEST>" in content:
+                    req = content.split("<USER_REQUEST>")[-1].split("</USER_REQUEST>")[0].strip()
+                print(f"{CLR_BOLD}{CLR_BLUE}================================================================================{CLR_RESET}")
+                print(f"{CLR_BOLD}{CLR_BLUE}👤 USER INPUT | Timestamp: {time}{CLR_RESET}")
+                print(f"{CLR_BOLD}{CLR_BLUE}================================================================================{CLR_RESET}")
+                print(f"{req}\n")
+                
+            elif source == "MODEL":
+                if step_type == "PLANNER_RESPONSE":
+                    if show_thoughts and thinking:
+                        print(f"{CLR_DIM}{CLR_YELLOW}--------------------------------------------------------------------------------{CLR_RESET}")
+                        print(f"{CLR_DIM}{CLR_YELLOW}🤖 ASSISTANT INTERNAL THOUGHTS{CLR_RESET}")
+                        print(f"{CLR_DIM}{CLR_YELLOW}--------------------------------------------------------------------------------{CLR_RESET}")
+                        print(f"{CLR_DIM}{CLR_YELLOW}{thinking}{CLR_RESET}\n")
+                        
+                    if content:
+                        print(f"{CLR_BOLD}{CLR_GREEN}--------------------------------------------------------------------------------{CLR_RESET}")
+                        print(f"{CLR_BOLD}{CLR_GREEN}🤖 ASSISTANT RESPONSE | Timestamp: {time}{CLR_RESET}")
+                        print(f"{CLR_BOLD}{CLR_GREEN}--------------------------------------------------------------------------------{CLR_RESET}")
+                        print(f"{content}\n")
+                        
+                    if show_tools and tool_calls:
+                        print(f"{CLR_BOLD}{CLR_MAGENTA}🛠️ TOOL CALLS REQUESTED:{CLR_RESET}")
+                        for tc in tool_calls:
+                            tc_name = tc.get("name")
+                            tc_args = json.dumps(tc.get("args"), indent=2)
+                            print(f"  {CLR_BOLD}Tool: {tc_name}{CLR_RESET}")
+                            print(f"  Arguments:\n{CLR_DIM}{tc_args}{CLR_RESET}\n")
+                            
+                elif show_tools and step_type in ["RUN_COMMAND", "VIEW_FILE", "LIST_DIRECTORY", "GREP_SEARCH", "COMMAND_OUTPUT"]:
+                    print(f"{CLR_BOLD}{CLR_CYAN}⚙️ TOOL EXECUTION OUTPUT | {step_type}{CLR_RESET}")
+                    print(f"{CLR_CYAN}{content}{CLR_RESET}\n")
+
+def main():
+    args = sys.argv[1:]
+    
+    if "--help" in args or "-h" in args:
+        print_help()
+        
+    use_color = "--no-color" not in args
+    show_thoughts = "--no-thoughts" not in args
+    show_tools = "--no-tools" not in args
+    
+    # Check for --restore option
+    if "--restore" in args:
+        try:
+            restore_idx = args.index("--restore")
+            if restore_idx + 1 < len(args):
+                conv_id = args[restore_idx + 1]
+                restore_conversation(conv_id)
+                sys.exit(0)
+            else:
+                print(f"{CLR_RED}[-] Error: --restore requires a conversation ID.{CLR_RESET}")
+                sys.exit(1)
+        except ValueError:
+            pass
+            
+    # Strip options from positional arguments
+    pos_args = [a for a in args if not a.startswith("--") and not a.startswith("-")]
+    
+    if not pos_args:
+        list_conversations()
+        sys.exit(0)
+        
+    target = pos_args[0]
+    
+    # Check if target is a file path
+    if os.path.exists(target):
+        render_transcript(target, use_color, show_thoughts, show_tools)
+        sys.exit(0)
+        
+    # Check if target is a UUID matching a brain conversation folder
+    brain_path = os.path.join(BASE_DIR, "brain", target, ".system_generated", "logs", "transcript.jsonl")
+    if os.path.exists(brain_path):
+        render_transcript(brain_path, use_color, show_thoughts, show_tools)
+        sys.exit(0)
+        
+    # Check if target is a UUID matching a conversations pb file
+    pb_path = os.path.join(BASE_DIR, "conversations", f"{target}.pb")
+    if os.path.exists(pb_path):
+        print(f"{CLR_YELLOW}[!] Found binary state file at {pb_path}.{CLR_RESET}")
+        print(f"[*] Redirecting automatically to the JSONL log file under brain directory...")
+        redirect_path = os.path.join(BASE_DIR, "brain", target, ".system_generated", "logs", "transcript.jsonl")
+        if os.path.exists(redirect_path):
+            render_transcript(redirect_path, use_color, show_thoughts, show_tools)
+            sys.exit(0)
+        else:
+            print(f"{CLR_RED}[-] Error: Log file {redirect_path} does not exist.{CLR_RESET}")
+            sys.exit(1)
+            
+    print(f"{CLR_RED}[-] Error: Could not resolve '{target}' to an existing file or conversation ID.{CLR_RESET}")
+    print("Run without arguments to list all active conversations.")
+    sys.exit(1)
+
+if __name__ == "__main__":
+    main()
