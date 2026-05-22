@@ -21,11 +21,13 @@ BASE_DIR = "/home/dpavlin/.gemini/antigravity-cli"
 def print_help():
     print(f"{CLR_BOLD}Explore Conversation Transcripts & Manage Sessions{CLR_RESET}")
     print("Usage:")
-    print("  agy-explore                       # List all conversations with details")
+    print("  agy-explore                       # List conversations for the current directory")
+    print("  agy-explore -a, --all             # List all conversations across all workspaces")
     print("  agy-explore <conversation_id>     # Print full conversation log")
     print("  agy-explore --restore <conv_id>   # Make a conversation active in its workspace")
     print("  agy-explore <path_to_jsonl_file>  # Print specific JSONL file")
     print("\nOptions:")
+    print("  -a, --all      List all conversations (default shows only current directory)")
     print("  --no-color     Disable ANSI color codes")
     print("  --no-thoughts  Exclude internal assistant thinking processes")
     print("  --no-tools     Exclude tool call/output logs")
@@ -69,7 +71,7 @@ def format_duration(seconds):
     days = hours / 24
     return f"{int(days)}d {int(hours % 24)}h"
 
-def list_conversations():
+def list_conversations(show_all=False):
     brain_dir = os.path.join(BASE_DIR, "brain")
     if not os.path.isdir(brain_dir):
         print(f"{CLR_RED}[-] Brain directory not found at {brain_dir}{CLR_RESET}")
@@ -84,14 +86,27 @@ def list_conversations():
     workspace_mappings = load_workspace_mappings()
     
     conversations = []
+    cwd = os.path.realpath(os.getcwd())
     
-    print(f"[*] Analyzing {len(dirs)} conversation log(s) from brain store...")
+    if show_all:
+        print(f"[*] Analyzing {len(dirs)} conversation log(s) across all workspaces...")
+    else:
+        print(f"[*] Analyzing conversation log(s) for current directory ({cwd})...")
+        print(f"[*] (Use '-a' or '--all' to display all workspaces)")
     
     for uuid_str in dirs:
         log_path = os.path.join(brain_dir, uuid_str, ".system_generated", "logs", "transcript.jsonl")
         if not os.path.exists(log_path):
             continue
             
+        workspace = workspace_mappings.get(uuid_str, "Unknown Workspace")
+        
+        # Filter by current directory if not showing all
+        if not show_all:
+            norm_workspace = os.path.realpath(workspace) if workspace != "Unknown Workspace" else None
+            if norm_workspace != cwd:
+                continue
+                
         mtime = os.path.getmtime(log_path)
         mtime_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
         
@@ -162,8 +177,6 @@ def list_conversations():
             diff_sec = (end_time - start_time).total_seconds()
             duration_str = format_duration(diff_sec)
             
-        workspace = workspace_mappings.get(uuid_str, "Unknown Workspace")
-        
         conversations.append({
             "uuid": uuid_str,
             "mtime": mtime,
@@ -179,6 +192,11 @@ def list_conversations():
         
     # Sort by mtime descending
     conversations.sort(key=lambda x: x["mtime"], reverse=True)
+    
+    if not conversations:
+        print(f"{CLR_YELLOW}[!] No matching conversation logs found for current directory.{CLR_RESET}")
+        print(f"[*] Use {CLR_BOLD}agy-explore -a{CLR_RESET} to list all sessions.")
+        return
     
     for idx, c in enumerate(conversations, 1):
         print(f"\n{CLR_BOLD}{CLR_BLUE}================================================================================{CLR_RESET}")
@@ -327,6 +345,7 @@ def main():
     use_color = "--no-color" not in args
     show_thoughts = "--no-thoughts" not in args
     show_tools = "--no-tools" not in args
+    show_all = "-a" in args or "--all" in args
     
     # Check for --restore option
     if "--restore" in args:
@@ -342,11 +361,11 @@ def main():
         except ValueError:
             pass
             
-    # Strip options from positional arguments
-    pos_args = [a for a in args if not a.startswith("--") and not a.startswith("-")]
+    # Strip options from positional arguments (including -a/--all and single-dash flags)
+    pos_args = [a for a in args if not a.startswith("-")]
     
     if not pos_args:
-        list_conversations()
+        list_conversations(show_all=show_all)
         sys.exit(0)
         
     target = pos_args[0]
