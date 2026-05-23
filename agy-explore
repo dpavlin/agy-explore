@@ -189,8 +189,6 @@ def list_conversations(show_all=False, num_first=1, num_last=1):
                             clean_content = content.split("<USER_REQUEST>")[-1].split("</USER_REQUEST>")[0].strip()
                         
                         clean_content = clean_content.replace("\n", " ").strip()
-                        if len(clean_content) > 60:
-                            clean_content = clean_content[:57] + "..."
                             
                         user_prompts.append(clean_content)
                         
