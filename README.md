@@ -52,7 +52,7 @@ agy-explore -a --first 2 --last 2
 ### 4. Stream a Conversation Log to `less`
 To read a specific conversation session with full terminal color highlighting and tool detail:
 ```bash
-agy-explore <conversation_id> | less -R
+agy-explore <conversation_id> | less -R -S
 ```
 
 ### 5. Restore an Active Session Pointer
