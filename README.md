@@ -6,7 +6,7 @@ It aggregates statistics, active time spans, workspace directories, tool executi
 
 ## Key Features
 
-- 👤 **Prompt Identity Mapping:** Parses and displays the first and last prompts of a conversation to instantly identify what the session was about.
+- 👤 **Prompt Identity Mapping:** Parses and displays customizable subsets of the first and last prompts in full uncropped detail to instantly identify what the session was about (using the `--first` and `--last` options).
 - ⚙️ **No Truncation Streams:** Allows you to read raw tool execution results and assistant plans in full detail without arbitrary line constraints.
 - ⏱️ **Time Span Calculations:** Displays active duration ranges (in seconds, minutes, hours, or days) along with the last activity timestamp.
 - 🛠️ **Detailed Session Statistics:** Aggregates logs to show step counts, tool execution rates, and assistant reasoning/thinking iterations.
@@ -43,13 +43,19 @@ agy-explore -a
 # or: agy-explore --all
 ```
 
-### 3. Stream a Conversation Log to `less`
+### 3. Display Custom Prompt Subsets in Full
+To list conversations and view the first 2 and last 2 user prompts in full uncropped detail:
+```bash
+agy-explore -a --first 2 --last 2
+```
+
+### 4. Stream a Conversation Log to `less`
 To read a specific conversation session with full terminal color highlighting and tool detail:
 ```bash
 agy-explore <conversation_id> | less -R
 ```
 
-### 4. Restore an Active Session Pointer
+### 5. Restore an Active Session Pointer
 To mark a past conversation as the active pointer for its project workspace (updates `last_conversations.json` pointer):
 ```bash
 agy-explore --restore <conversation_id>
