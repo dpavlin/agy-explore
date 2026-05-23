@@ -61,6 +61,8 @@ agy-explore --restore <conversation_id>
 
 - `-a`, `--all`: List all conversations globally (by default, only current directory sessions are listed).
 - `-d`, `--debug`: Enable detailed real-time diagnostic logging (emitted to `sys.stderr` for easy redirection).
+- `--first <N>`: Specify the number of first prompts to show for each conversation (default: `1`).
+- `--last <M>`: Specify the number of last prompts to show for each conversation (default: `1`).
 - `--no-color`: Disable ANSI color terminal sequences.
 - `--no-thoughts`: Exclude assistant internal reasoning blocks to see only final user/assistant dialog.
 - `--no-tools`: Exclude raw tool execution logs.

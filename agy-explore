@@ -38,6 +38,8 @@ def print_help():
     print("\nOptions:")
     print("  -a, --all      List all conversations (default shows only current directory)")
     print("  -d, --debug    Enable detailed stderr telemetry logging")
+    print("  --first <N>    Specify number of first prompts to show (default: 1)")
+    print("  --last <M>     Specify number of last prompts to show (default: 1)")
     print("  --no-color     Disable ANSI color codes")
     print("  --no-thoughts  Exclude internal assistant thinking processes")
     print("  --no-tools     Exclude tool call/output logs")
@@ -88,7 +90,7 @@ def format_duration(seconds):
     days = hours / 24
     return f"{int(days)}d {int(hours % 24)}h"
 
-def list_conversations(show_all=False):
+def list_conversations(show_all=False, num_first=1, num_last=1):
     brain_dir = os.path.join(BASE_DIR, "brain")
     debug_log(f"Scanning brain directory: {brain_dir}")
     if not os.path.isdir(brain_dir):
@@ -134,8 +136,7 @@ def list_conversations(show_all=False):
         mtime = os.path.getmtime(log_path)
         mtime_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
         
-        first_prompt = "N/A"
-        last_prompt = "N/A"
+        user_prompts = []
         start_time = None
         end_time = None
         
@@ -191,9 +192,7 @@ def list_conversations(show_all=False):
                         if len(clean_content) > 60:
                             clean_content = clean_content[:57] + "..."
                             
-                        if first_prompt == "N/A":
-                            first_prompt = clean_content
-                        last_prompt = clean_content
+                        user_prompts.append(clean_content)
                         
         except Exception as e:
             debug_log(f"Error processing {uuid_str}: {e}")
@@ -208,8 +207,7 @@ def list_conversations(show_all=False):
             "uuid": uuid_str,
             "mtime": mtime,
             "mtime_str": mtime_str,
-            "first_prompt": first_prompt,
-            "last_prompt": last_prompt,
+            "user_prompts": user_prompts,
             "duration": duration_str,
             "total_steps": total_steps,
             "tool_calls": tool_call_count,
@@ -232,8 +230,34 @@ def list_conversations(show_all=False):
         print(f"  {CLR_BOLD}Project Directory:{CLR_RESET} {CLR_CYAN}{c['workspace']}{CLR_RESET}")
         print(f"  {CLR_BOLD}Active Duration:  {CLR_RESET} {c['duration']} (Last Activity: {c['mtime_str']})")
         print(f"  {CLR_BOLD}Statistics:       {CLR_RESET} {c['total_steps']} total steps | {c['tool_calls']} tool calls executed | {c['thoughts']} reasoning cycles")
-        print(f"  {CLR_BOLD}First Prompt:     {CLR_RESET} {CLR_WHITE}\"{c['first_prompt']}\"{CLR_RESET}")
-        print(f"  {CLR_BOLD}Last Prompt:      {CLR_RESET} {CLR_WHITE}\"{c['last_prompt']}\"{CLR_RESET}")
+        
+        user_prompts = c.get("user_prompts", [])
+        
+        # Extract first N prompts
+        if num_first == 1:
+            val = f"\"{user_prompts[0]}\"" if user_prompts else "\"N/A\""
+            print(f"  {CLR_BOLD}First Prompt:     {CLR_RESET} {CLR_WHITE}{val}{CLR_RESET}")
+        elif num_first > 1:
+            first_subset = user_prompts[:num_first]
+            if first_subset:
+                print(f"  {CLR_BOLD}First Prompts ({len(first_subset)}):{CLR_RESET}")
+                for p in first_subset:
+                    print(f"    {CLR_DIM}-{CLR_RESET} {CLR_WHITE}\"{p}\"{CLR_RESET}")
+            else:
+                print(f"  {CLR_BOLD}First Prompts:    {CLR_RESET} {CLR_WHITE}\"N/A\"{CLR_RESET}")
+                
+        # Extract last M prompts
+        if num_last == 1:
+            val = f"\"{user_prompts[-1]}\"" if user_prompts else "\"N/A\""
+            print(f"  {CLR_BOLD}Last Prompt:      {CLR_RESET} {CLR_WHITE}{val}{CLR_RESET}")
+        elif num_last > 1:
+            last_subset = user_prompts[-num_last:]
+            if last_subset:
+                print(f"  {CLR_BOLD}Last Prompts ({len(last_subset)}):{CLR_RESET}")
+                for p in last_subset:
+                    print(f"    {CLR_DIM}-{CLR_RESET} {CLR_WHITE}\"{p}\"{CLR_RESET}")
+            else:
+                print(f"  {CLR_BOLD}Last Prompts:     {CLR_RESET} {CLR_WHITE}\"N/A\"{CLR_RESET}")
         
         # Output restore command instructions
         if c['workspace'] != "Unknown Workspace":
@@ -395,8 +419,35 @@ def main():
     show_all = "-a" in args or "--all" in args
     DEBUG_MODE = "-d" in args or "--debug" in args
     
+    num_first = 1
+    num_last = 1
+    
+    if "--first" in args:
+        try:
+            idx = args.index("--first")
+            if idx + 1 < len(args):
+                num_first = int(args[idx + 1])
+            else:
+                print(f"{CLR_RED}[-] Error: --first requires a numeric argument.{CLR_RESET}")
+                sys.exit(1)
+        except ValueError:
+            print(f"{CLR_RED}[-] Error: --first requires a numeric argument.{CLR_RESET}")
+            sys.exit(1)
+            
+    if "--last" in args:
+        try:
+            idx = args.index("--last")
+            if idx + 1 < len(args):
+                num_last = int(args[idx + 1])
+            else:
+                print(f"{CLR_RED}[-] Error: --last requires a numeric argument.{CLR_RESET}")
+                sys.exit(1)
+        except ValueError:
+            print(f"{CLR_RED}[-] Error: --last requires a numeric argument.{CLR_RESET}")
+            sys.exit(1)
+            
     debug_log(f"Starting agy-explore. Arguments: {args}")
-    debug_log(f"Options parsed - show_all: {show_all}, use_color: {use_color}, show_thoughts: {show_thoughts}, show_tools: {show_tools}, debug: {DEBUG_MODE}")
+    debug_log(f"Options parsed - show_all: {show_all}, use_color: {use_color}, show_thoughts: {show_thoughts}, show_tools: {show_tools}, debug: {DEBUG_MODE}, num_first: {num_first}, num_last: {num_last}")
     
     # Check for --restore option
     if "--restore" in args:
@@ -412,12 +463,23 @@ def main():
         except ValueError:
             pass
             
-    # Strip options from positional arguments (including -a/--all and single-dash flags)
-    pos_args = [a for a in args if not a.startswith("-")]
+    # Robustly parse positional arguments while excluding options and their values
+    pos_args = []
+    skip_next = False
+    for i, arg in enumerate(args):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in ["--first", "--last", "--restore"]:
+            skip_next = True
+            continue
+        if arg.startswith("-"):
+            continue
+        pos_args.append(arg)
     
     if not pos_args:
         debug_log("No positional arguments. Cataloging active conversations.")
-        list_conversations(show_all=show_all)
+        list_conversations(show_all=show_all, num_first=num_first, num_last=num_last)
         sys.exit(0)
         
     target = pos_args[0]
