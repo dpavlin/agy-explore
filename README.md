@@ -30,19 +30,26 @@ Now you can type `agy-` in your terminal and press `<TAB>` for automatic tab com
 
 ## Command Usage
 
-### 1. Catalog all Available Conversations
-To display a highly data-dense, structured overview of all your past conversations:
+### 1. Catalog Conversations for Current Directory
+To display a highly data-dense, structured overview of past conversations filtered by the current workspace:
 ```bash
 agy-explore
 ```
 
-### 2. Stream a Conversation Log to `less`
+### 2. Catalog All Conversations Across All Workspaces
+To list all past conversations globally across all projects/directories:
+```bash
+agy-explore -a
+# or: agy-explore --all
+```
+
+### 3. Stream a Conversation Log to `less`
 To read a specific conversation session with full terminal color highlighting and tool detail:
 ```bash
 agy-explore <conversation_id> | less -R
 ```
 
-### 3. Restore an Active Session Pointer
+### 4. Restore an Active Session Pointer
 To mark a past conversation as the active pointer for its project workspace (updates `last_conversations.json` pointer):
 ```bash
 agy-explore --restore <conversation_id>
@@ -52,6 +59,8 @@ agy-explore --restore <conversation_id>
 
 ## CLI Options
 
+- `-a`, `--all`: List all conversations globally (by default, only current directory sessions are listed).
+- `-d`, `--debug`: Enable detailed real-time diagnostic logging (emitted to `sys.stderr` for easy redirection).
 - `--no-color`: Disable ANSI color terminal sequences.
 - `--no-thoughts`: Exclude assistant internal reasoning blocks to see only final user/assistant dialog.
 - `--no-tools`: Exclude raw tool execution logs.

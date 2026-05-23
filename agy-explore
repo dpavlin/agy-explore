@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+import re
 from datetime import datetime
 
 # ANSI Escape Codes for Beautiful Terminal Output
@@ -18,6 +19,14 @@ CLR_WHITE = "\033[37m"
 
 BASE_DIR = "/home/dpavlin/.gemini/antigravity-cli"
 
+DEBUG_MODE = False
+
+def debug_log(msg):
+    if DEBUG_MODE:
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        sys.stderr.write(f"{CLR_DIM}{CLR_YELLOW}[DEBUG {timestamp}] {msg}{CLR_RESET}\n")
+        sys.stderr.flush()
+
 def print_help():
     print(f"{CLR_BOLD}Explore Conversation Transcripts & Manage Sessions{CLR_RESET}")
     print("Usage:")
@@ -28,6 +37,7 @@ def print_help():
     print("  agy-explore <path_to_jsonl_file>  # Print specific JSONL file")
     print("\nOptions:")
     print("  -a, --all      List all conversations (default shows only current directory)")
+    print("  -d, --debug    Enable detailed stderr telemetry logging")
     print("  --no-color     Disable ANSI color codes")
     print("  --no-thoughts  Exclude internal assistant thinking processes")
     print("  --no-tools     Exclude tool call/output logs")
@@ -39,23 +49,30 @@ def load_workspace_mappings():
     """Reads history.jsonl to build a conversation-to-workspace mapping."""
     history_path = os.path.join(BASE_DIR, "history.jsonl")
     mappings = {}
+    debug_log(f"Attempting to load workspace mappings from: {history_path}")
     if not os.path.exists(history_path):
+        debug_log(f"History file not found at: {history_path}")
         return mappings
         
     try:
+        line_count = 0
         with open(history_path, "r", encoding="utf-8") as f:
             for line in f:
                 if not line.strip():
                     continue
+                line_count += 1
                 try:
                     data = json.loads(line)
                     cid = data.get("conversationId")
                     workspace = data.get("workspace")
                     if cid and workspace:
                         mappings[cid] = workspace
-                except Exception:
+                except Exception as ex:
+                    debug_log(f"JSON decode failed on history line {line_count}: {ex}")
                     continue
+        debug_log(f"Successfully loaded {len(mappings)} mappings from {line_count} history records.")
     except Exception as e:
+        debug_log(f"Error loading workspace mappings: {e}")
         print(f"[!] Warning: failed to load workspace mappings: {e}")
     return mappings
 
@@ -73,7 +90,9 @@ def format_duration(seconds):
 
 def list_conversations(show_all=False):
     brain_dir = os.path.join(BASE_DIR, "brain")
+    debug_log(f"Scanning brain directory: {brain_dir}")
     if not os.path.isdir(brain_dir):
+        debug_log(f"Brain directory not found at: {brain_dir}")
         print(f"{CLR_RED}[-] Brain directory not found at {brain_dir}{CLR_RESET}")
         return
     
@@ -82,11 +101,13 @@ def list_conversations(show_all=False):
         full_path = os.path.join(brain_dir, entry)
         if os.path.isdir(full_path):
             dirs.append(entry)
+    debug_log(f"Found {len(dirs)} candidate directories in brain store.")
             
     workspace_mappings = load_workspace_mappings()
     
     conversations = []
     cwd = os.path.realpath(os.getcwd())
+    debug_log(f"Target query CWD path: {cwd}")
     
     if show_all:
         print(f"[*] Analyzing {len(dirs)} conversation log(s) across all workspaces...")
@@ -97,6 +118,7 @@ def list_conversations(show_all=False):
     for uuid_str in dirs:
         log_path = os.path.join(brain_dir, uuid_str, ".system_generated", "logs", "transcript.jsonl")
         if not os.path.exists(log_path):
+            debug_log(f"Skipping directory {uuid_str}: transcript.jsonl not found")
             continue
             
         workspace = workspace_mappings.get(uuid_str, "Unknown Workspace")
@@ -105,8 +127,10 @@ def list_conversations(show_all=False):
         if not show_all:
             norm_workspace = os.path.realpath(workspace) if workspace != "Unknown Workspace" else None
             if norm_workspace != cwd:
+                debug_log(f"Filtering out session {uuid_str}: workspace '{norm_workspace}' does not match CWD '{cwd}'")
                 continue
                 
+        debug_log(f"Processing session: {uuid_str} (workspace: {workspace})")
         mtime = os.path.getmtime(log_path)
         mtime_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
         
@@ -120,9 +144,11 @@ def list_conversations(show_all=False):
         total_steps = 0
         
         try:
+            debug_log(f"Opening transcript log file: {log_path}")
             with open(log_path, "r", encoding="utf-8") as f:
                 lines = [line.strip() for line in f if line.strip()]
                 total_steps = len(lines)
+                debug_log(f"Read {total_steps} log entries for session {uuid_str}")
                 
                 for idx, line in enumerate(lines):
                     data = json.loads(line)
@@ -170,6 +196,7 @@ def list_conversations(show_all=False):
                         last_prompt = clean_content
                         
         except Exception as e:
+            debug_log(f"Error processing {uuid_str}: {e}")
             print(f"[!] Error processing {uuid_str}: {e}")
             
         duration_str = "N/A"
@@ -222,22 +249,28 @@ def list_conversations(show_all=False):
 def restore_conversation(conv_id):
     """Restores the given conversation ID to its associated workspace in the last_conversations cache."""
     brain_dir = os.path.join(BASE_DIR, "brain", conv_id)
+    debug_log(f"Restoring conversation {conv_id}. Checking brain directory: {brain_dir}")
     if not os.path.isdir(brain_dir):
+        debug_log(f"Error: brain directory not found for {conv_id}")
         print(f"{CLR_RED}[- ] Error: conversation ID {conv_id} does not exist in brain store.{CLR_RESET}")
         sys.exit(1)
         
     workspace_mappings = load_workspace_mappings()
     workspace = workspace_mappings.get(conv_id)
+    debug_log(f"Initial workspace mapping query: {workspace}")
     
     if not workspace:
         # Let's fallback to search inside the transcript log for project path or user path
         log_path = os.path.join(brain_dir, ".system_generated", "logs", "transcript.jsonl")
+        debug_log(f"Mapping not found in history.jsonl. Performing fallback search in transcript: {log_path}")
         if os.path.exists(log_path):
             try:
+                line_idx = 0
                 with open(log_path, "r", encoding="utf-8") as f:
                     for line in f:
                         if not line.strip():
                             continue
+                        line_idx += 1
                         data = json.loads(line)
                         content = data.get("content", "")
                         if "Workspace:" in content or "active workspaces" in content:
@@ -245,22 +278,28 @@ def restore_conversation(conv_id):
                             match = re.search(r"Workspace:\s*([^\n\r]+)", content)
                             if match:
                                 workspace = match.group(1).strip()
+                                debug_log(f"Matched workspace in transcript line {line_idx}: {workspace}")
                                 break
-            except Exception:
+            except Exception as e:
+                debug_log(f"Error scanning transcript for fallback workspace mapping: {e}")
                 pass
                 
     if not workspace:
         # Default fallback to home or ask user
         workspace = "/home/dpavlin"
+        debug_log(f"Fallback workspace matching failed. Defaulting workspace pointer to: {workspace}")
         print(f"{CLR_YELLOW}[!] Warning: Workspace not mapped in logs. Defaulting pointer to {workspace}.{CLR_RESET}")
         
     cache_path = os.path.join(BASE_DIR, "cache", "last_conversations.json")
     cache_data = {}
+    debug_log(f"Updating last_conversations cache file: {cache_path}")
     if os.path.exists(cache_path):
         try:
             with open(cache_path, "r", encoding="utf-8") as f:
                 cache_data = json.load(f)
+            debug_log(f"Loaded {len(cache_data)} existing cache pointers.")
         except Exception as e:
+            debug_log(f"Error reading existing cache file: {e}")
             print(f"[!] Warning: failed to parse cache: {e}")
             
     cache_data[workspace] = conv_id
@@ -269,11 +308,13 @@ def restore_conversation(conv_id):
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(cache_data, f, indent=2)
+        debug_log(f"Cache pointer mapped successfully: {workspace} -> {conv_id}")
         print(f"{CLR_GREEN}[+] Success: Conversation {conv_id} has been marked active for workspace '{workspace}'.{CLR_RESET}")
         print(f"{CLR_BOLD}To resume the CLI session, run the following commands:{CLR_RESET}")
         print(f"  {CLR_CYAN}cd {workspace}{CLR_RESET}")
         print(f"  {CLR_CYAN}agy --conversation {conv_id}{CLR_RESET}")
     except Exception as e:
+        debug_log(f"Error writing cache pointer mapping: {e}")
         print(f"{CLR_RED}[-] Failed to update last_conversations cache: {e}{CLR_RESET}")
         sys.exit(1)
 
@@ -282,15 +323,19 @@ def render_transcript(file_path, use_color=True, show_thoughts=True, show_tools=
         global CLR_RESET, CLR_BOLD, CLR_DIM, CLR_RED, CLR_GREEN, CLR_YELLOW, CLR_BLUE, CLR_MAGENTA, CLR_CYAN, CLR_WHITE
         CLR_RESET = CLR_BOLD = CLR_DIM = CLR_RED = CLR_GREEN = CLR_YELLOW = CLR_BLUE = CLR_MAGENTA = CLR_CYAN = CLR_WHITE = ""
         
+    debug_log(f"Starting rendering for transcript file: {file_path}")
     print(f"{CLR_BOLD}{CLR_CYAN}[*] Streaming transcript: {file_path}{CLR_RESET}\n")
     
+    step_count = 0
     with open(file_path, "r", encoding="utf-8") as f:
         for line_num, line in enumerate(f, 1):
             if not line.strip():
                 continue
+            step_count += 1
             try:
                 step = json.loads(line)
             except json.JSONDecodeError as e:
+                debug_log(f"JSON decode failed on transcript line {line_num}: {e}")
                 print(f"{CLR_RED}[!] JSON decode error at line {line_num}: {e}{CLR_RESET}")
                 continue
                 
@@ -335,8 +380,10 @@ def render_transcript(file_path, use_color=True, show_thoughts=True, show_tools=
                 elif show_tools and step_type in ["RUN_COMMAND", "VIEW_FILE", "LIST_DIRECTORY", "GREP_SEARCH", "COMMAND_OUTPUT"]:
                     print(f"{CLR_BOLD}{CLR_CYAN}⚙️ TOOL EXECUTION OUTPUT | {step_type}{CLR_RESET}")
                     print(f"{CLR_CYAN}{content}{CLR_RESET}\n")
+    debug_log(f"Successfully rendered {step_count} transcript steps.")
 
 def main():
+    global DEBUG_MODE
     args = sys.argv[1:]
     
     if "--help" in args or "-h" in args:
@@ -346,6 +393,10 @@ def main():
     show_thoughts = "--no-thoughts" not in args
     show_tools = "--no-tools" not in args
     show_all = "-a" in args or "--all" in args
+    DEBUG_MODE = "-d" in args or "--debug" in args
+    
+    debug_log(f"Starting agy-explore. Arguments: {args}")
+    debug_log(f"Options parsed - show_all: {show_all}, use_color: {use_color}, show_thoughts: {show_thoughts}, show_tools: {show_tools}, debug: {DEBUG_MODE}")
     
     # Check for --restore option
     if "--restore" in args:
@@ -365,32 +416,41 @@ def main():
     pos_args = [a for a in args if not a.startswith("-")]
     
     if not pos_args:
+        debug_log("No positional arguments. Cataloging active conversations.")
         list_conversations(show_all=show_all)
         sys.exit(0)
         
     target = pos_args[0]
     
     # Check if target is a file path
+    debug_log(f"Evaluating target argument: '{target}'")
     if os.path.exists(target):
+        debug_log(f"Target '{target}' exists as a local file. Rendering transcript.")
         render_transcript(target, use_color, show_thoughts, show_tools)
         sys.exit(0)
         
     # Check if target is a UUID matching a brain conversation folder
     brain_path = os.path.join(BASE_DIR, "brain", target, ".system_generated", "logs", "transcript.jsonl")
+    debug_log(f"Checking brain transcript path: '{brain_path}'")
     if os.path.exists(brain_path):
+        debug_log(f"Target matches brain path. Rendering transcript: {brain_path}")
         render_transcript(brain_path, use_color, show_thoughts, show_tools)
         sys.exit(0)
         
     # Check if target is a UUID matching a conversations pb file
     pb_path = os.path.join(BASE_DIR, "conversations", f"{target}.pb")
+    debug_log(f"Checking conversations pb path: '{pb_path}'")
     if os.path.exists(pb_path):
+        debug_log(f"Target matches pb path. Redirecting.")
         print(f"{CLR_YELLOW}[!] Found binary state file at {pb_path}.{CLR_RESET}")
         print(f"[*] Redirecting automatically to the JSONL log file under brain directory...")
         redirect_path = os.path.join(BASE_DIR, "brain", target, ".system_generated", "logs", "transcript.jsonl")
+        debug_log(f"Redirecting to: {redirect_path}")
         if os.path.exists(redirect_path):
             render_transcript(redirect_path, use_color, show_thoughts, show_tools)
             sys.exit(0)
         else:
+            debug_log(f"Redirect transcript file path does not exist: {redirect_path}")
             print(f"{CLR_RED}[-] Error: Log file {redirect_path} does not exist.{CLR_RESET}")
             sys.exit(1)
             
