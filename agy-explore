@@ -38,6 +38,7 @@ def print_help():
     print("\nOptions:")
     print("  -a, --all      List all conversations (default shows only current directory)")
     print("  -d, --debug    Enable detailed stderr telemetry logging")
+    print("  -v, --verbose  Set verbosity level (-v: show file details/contents, -vv: show tool breakdown/aggregated stats, -vvv: dev telemetry)")
     print("  --first <N>    Specify number of first prompts to show (default: 1)")
     print("  --last <M>     Specify number of last prompts to show (default: 1)")
     print("  --no-color     Disable ANSI color codes")
@@ -90,7 +91,27 @@ def format_duration(seconds):
     days = hours / 24
     return f"{int(days)}d {int(hours % 24)}h"
 
-def get_generated_brain_files(session_uuid):
+def format_size(bytes_val):
+    if bytes_val < 1024:
+        return f"{bytes_val} B"
+    kb = bytes_val / 1024.0
+    if kb < 1024:
+        return f"{kb:.1f} KB"
+    mb = kb / 1024.0
+    return f"{mb:.1f} MB"
+
+def is_text_file(filepath):
+    try:
+        with open(filepath, "rb") as f:
+            chunk = f.read(1024)
+        if b'\x00' in chunk:
+            return False
+        chunk.decode("utf-8", errors="strict")
+        return True
+    except Exception:
+        return False
+
+def get_generated_brain_files_detailed(session_uuid):
     session_dir = os.path.join(BASE_DIR, "brain", session_uuid)
     files_found = []
     if not os.path.isdir(session_dir):
@@ -106,11 +127,37 @@ def get_generated_brain_files(session_uuid):
                 continue
             full_path = os.path.join(root, file)
             rel_path = os.path.relpath(full_path, session_dir)
-            files_found.append(rel_path)
             
-    return sorted(files_found)
+            size_bytes = 0
+            mtime_str = "N/A"
+            ext = os.path.splitext(file)[1].lower()
+            content = None
+            is_text = False
+            
+            try:
+                stat = os.stat(full_path)
+                size_bytes = stat.st_size
+                mtime_str = datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')
+                
+                is_text = is_text_file(full_path)
+                if is_text:
+                    with open(full_path, "r", encoding="utf-8", errors="replace") as tf:
+                        content = tf.read()
+            except Exception:
+                pass
+                
+            files_found.append({
+                "path": rel_path,
+                "size": size_bytes,
+                "mtime_str": mtime_str,
+                "ext": ext,
+                "is_text": is_text,
+                "content": content
+            })
+            
+    return sorted(files_found, key=lambda x: x["path"])
 
-def list_conversations(show_all=False, num_first=1, num_last=1):
+def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0):
     brain_dir = os.path.join(BASE_DIR, "brain")
     debug_log(f"Scanning brain directory: {brain_dir}")
     if not os.path.isdir(brain_dir):
@@ -163,6 +210,7 @@ def list_conversations(show_all=False, num_first=1, num_last=1):
         tool_call_count = 0
         thought_count = 0
         total_steps = 0
+        tool_breakdown = {}
         
         try:
             debug_log(f"Opening transcript log file: {log_path}")
@@ -199,9 +247,14 @@ def list_conversations(show_all=False, num_first=1, num_last=1):
                     if data.get("thinking"):
                         thought_count += 1
                     if data.get("tool_calls"):
-                        tool_call_count += len(data.get("tool_calls"))
+                        t_calls = data.get("tool_calls")
+                        tool_call_count += len(t_calls)
+                        for tc in t_calls:
+                            tc_name = tc.get("name", "unknown")
+                            tool_breakdown[tc_name] = tool_breakdown.get(tc_name, 0) + 1
                     elif step_type in ["RUN_COMMAND", "VIEW_FILE", "LIST_DIRECTORY", "GREP_SEARCH", "COMMAND_OUTPUT"]:
                         tool_call_count += 1
+                        tool_breakdown[step_type.lower()] = tool_breakdown.get(step_type.lower(), 0) + 1
                         
                     if source == "USER_EXPLICIT" and step_type == "USER_INPUT":
                         clean_content = content
@@ -221,7 +274,7 @@ def list_conversations(show_all=False, num_first=1, num_last=1):
             diff_sec = (end_time - start_time).total_seconds()
             duration_str = format_duration(diff_sec)
             
-        brain_files = get_generated_brain_files(uuid_str)
+        brain_files = get_generated_brain_files_detailed(uuid_str)
             
         conversations.append({
             "uuid": uuid_str,
@@ -233,7 +286,8 @@ def list_conversations(show_all=False, num_first=1, num_last=1):
             "tool_calls": tool_call_count,
             "thoughts": thought_count,
             "workspace": workspace,
-            "brain_files": brain_files
+            "brain_files": brain_files,
+            "tool_breakdown": tool_breakdown
         })
         
     # Sort by mtime descending
@@ -252,10 +306,35 @@ def list_conversations(show_all=False, num_first=1, num_last=1):
         print(f"  {CLR_BOLD}Active Duration:  {CLR_RESET} {c['duration']} (Last Activity: {c['mtime_str']})")
         print(f"  {CLR_BOLD}Statistics:       {CLR_RESET} {c['total_steps']} total steps | {c['tool_calls']} tool calls executed | {c['thoughts']} reasoning cycles")
         
+        # Display Tool Breakdown at Level 2+
+        if verbosity >= 2 and c.get("tool_breakdown"):
+            breakdown = c.get("tool_breakdown")
+            breakdown_str = ", ".join([f"{name}: {count}" for name, count in sorted(breakdown.items())])
+            print(f"  {CLR_BOLD}Tool Breakdown:   {CLR_RESET} {CLR_CYAN}{breakdown_str}{CLR_RESET}")
+            
         brain_files = c.get("brain_files", [])
         if brain_files:
-            files_str = ", ".join(brain_files)
-            print(f"  {CLR_BOLD}Generated Files:  {CLR_RESET} {CLR_CYAN}{files_str}{CLR_RESET}")
+            if verbosity == 0:
+                files_str = ", ".join([f["path"] for f in brain_files])
+                print(f"  {CLR_BOLD}Generated Files:  {CLR_RESET} {CLR_CYAN}{files_str}{CLR_RESET}")
+            else:
+                print(f"  {CLR_BOLD}Generated Files ({len(brain_files)}):{CLR_RESET}")
+                for f in brain_files:
+                    print(f"    {CLR_CYAN}- {f['path']} ({format_size(f['size'])}, {f['mtime_str']}){CLR_RESET}")
+                    if f['is_text'] and f['content'] is not None:
+                        print(f"      {CLR_DIM}--------------------------------------------------------------------------------{CLR_RESET}")
+                        for l in f['content'].splitlines():
+                            print(f"      {CLR_WHITE}{l}{CLR_RESET}")
+                        print(f"      {CLR_DIM}--------------------------------------------------------------------------------{CLR_RESET}")
+                
+                # Display Aggregated Stats at Level 2+
+                if verbosity >= 2:
+                    exts = [f["ext"] for f in brain_files]
+                    from collections import Counter
+                    counts = Counter(exts)
+                    ext_stats = ", ".join([f"{count} {ext if ext else 'no-ext'}" for ext, count in counts.items()])
+                    total_size = sum([f["size"] for f in brain_files])
+                    print(f"  {CLR_BOLD}Generated Files Stat:{CLR_RESET} {CLR_CYAN}{len(brain_files)} file(s) ({ext_stats}) | Total Payload: {format_size(total_size)}{CLR_RESET}")
         
         user_prompts = c.get("user_prompts", [])
         
@@ -443,7 +522,25 @@ def main():
     show_thoughts = "--no-thoughts" not in args
     show_tools = "--no-tools" not in args
     show_all = "-a" in args or "--all" in args
-    DEBUG_MODE = "-d" in args or "--debug" in args
+    
+    # Parse verbosity levels dynamically
+    verbosity = 0
+    for arg in args:
+        if arg == "-v":
+            verbosity = max(verbosity, 1)
+        elif arg == "-vv":
+            verbosity = max(verbosity, 2)
+        elif arg == "-vvv":
+            verbosity = max(verbosity, 3)
+        elif arg == "--verbose":
+            verbosity = max(verbosity, 1)
+        elif arg.startswith("-") and not arg.startswith("--"):
+            clean_arg = arg[1:]
+            if "v" in clean_arg:
+                v_count = clean_arg.count("v")
+                verbosity = max(verbosity, v_count)
+                
+    DEBUG_MODE = "-d" in args or "--debug" in args or verbosity >= 3
     
     num_first = 1
     num_last = 1
@@ -473,7 +570,7 @@ def main():
             sys.exit(1)
             
     debug_log(f"Starting agy-explore. Arguments: {args}")
-    debug_log(f"Options parsed - show_all: {show_all}, use_color: {use_color}, show_thoughts: {show_thoughts}, show_tools: {show_tools}, debug: {DEBUG_MODE}, num_first: {num_first}, num_last: {num_last}")
+    debug_log(f"Options parsed - show_all: {show_all}, use_color: {use_color}, show_thoughts: {show_thoughts}, show_tools: {show_tools}, debug: {DEBUG_MODE}, num_first: {num_first}, num_last: {num_last}, verbosity: {verbosity}")
     
     # Check for --restore option
     if "--restore" in args:
@@ -505,7 +602,7 @@ def main():
     
     if not pos_args:
         debug_log("No positional arguments. Cataloging active conversations.")
-        list_conversations(show_all=show_all, num_first=num_first, num_last=num_last)
+        list_conversations(show_all=show_all, num_first=num_first, num_last=num_last, verbosity=verbosity)
         sys.exit(0)
         
     target = pos_args[0]
