@@ -33,9 +33,9 @@
 - [x] Stage and commit changes to git
 
 ### New Standalone Tool: git-brain
-- [ ] Create standalone python3 script git-brain with directory scanners & git subprocesses
-- [ ] Implement automatic active workspace session lookup mapping
-- [ ] Implement chronological copy and commit chronological logic using env GIT_AUTHOR_DATE
-- [ ] Create executable symlink ~/.local/bin/git-brain
-- [ ] Verify script syntax and timeline-based commit verification
-- [ ] Update walkthrough.md to reflect outcomes
+- [x] Create standalone python3 script git-brain with directory scanners & git subprocesses
+- [x] Implement automatic active workspace session lookup mapping
+- [x] Implement chronological copy and commit chronological logic using env GIT_AUTHOR_DATE
+- [x] Create executable symlink ~/.local/bin/git-brain
+- [x] Verify script syntax and timeline-based commit verification
+- [x] Update walkthrough.md to reflect outcomes
