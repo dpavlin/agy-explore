@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+import json
+import os
+import sys
+import shutil
+import subprocess
+from datetime import datetime
+
+# ANSI Escape Codes for Beautiful Terminal Output
+CLR_RESET = "\033[0m"
+CLR_BOLD = "\033[1m"
+CLR_DIM = "\033[2m"
+CLR_RED = "\033[31m"
+CLR_GREEN = "\033[32m"
+CLR_YELLOW = "\033[33m"
+CLR_BLUE = "\033[34m"
+CLR_CYAN = "\033[36m"
+CLR_WHITE = "\033[37m"
+
+BASE_DIR = "/home/dpavlin/.gemini/antigravity-cli"
+
+def print_help():
+    print(f"{CLR_BOLD}git-brain: Archive Antigravity Session Artifacts to Git{CLR_RESET}")
+    print("Usage:")
+    print("  git-brain                         # Auto-detect session for current directory and import/commit")
+    print("  git-brain <conversation_id>       # Import and commit files from specific session ID")
+    print("\nOptions:")
+    print("  -h, --help                        Show this help screen")
+    sys.exit(0)
+
+def load_workspace_mappings():
+    """Reads history.jsonl to build a conversation-to-workspace mapping."""
+    history_path = os.path.join(BASE_DIR, "history.jsonl")
+    mappings = {}
+    if not os.path.exists(history_path):
+        return mappings
+    try:
+        with open(history_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    data = json.loads(line)
+                    cid = data.get("conversationId")
+                    workspace = data.get("workspace")
+                    if cid and workspace:
+                        mappings[cid] = workspace
+                except Exception:
+                    continue
+    except Exception as e:
+        print(f"{CLR_YELLOW}[!] Warning: Failed to load workspace mappings: {e}{CLR_RESET}")
+    return mappings
+
+def get_last_session_for_cwd(cwd):
+    """Finds the last active session ID mapped to the current directory."""
+    # Try reading cache file first
+    cache_path = os.path.join(BASE_DIR, "cache", "last_conversations.json")
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                cache_data = json.load(f)
+            # Match current directory (resolved realpath)
+            for ws_path, cid in cache_data.items():
+                if os.path.realpath(ws_path) == cwd:
+                    return cid
+        except Exception:
+            pass
+
+    # Fallback to history.jsonl scan
+    history_path = os.path.join(BASE_DIR, "history.jsonl")
+    if os.path.exists(history_path):
+        try:
+            last_cid = None
+            with open(history_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        data = json.loads(line)
+                        workspace = data.get("workspace")
+                        cid = data.get("conversationId")
+                        if workspace and cid and os.path.realpath(workspace) == cwd:
+                            last_cid = cid
+                    except Exception:
+                        continue
+            if last_cid:
+                return last_cid
+        except Exception:
+            pass
+
+    return None
+
+def get_generated_brain_files_detailed(session_uuid):
+    """Recursively locates text artifacts in the session brain directory."""
+    session_dir = os.path.join(BASE_DIR, "brain", session_uuid)
+    files_found = []
+    if not os.path.isdir(session_dir):
+        return files_found
+        
+    for root, dirs, files in os.walk(session_dir):
+        # Exclude system and hidden folders
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d != ".system_generated"]
+            
+        for file in files:
+            # Exclude metadata and hidden files
+            if file.endswith(".metadata.json") or file.startswith("."):
+                continue
+            full_path = os.path.join(root, file)
+            rel_path = os.path.relpath(full_path, session_dir)
+            
+            try:
+                stat = os.stat(full_path)
+                size_bytes = stat.st_size
+                mtime = stat.st_mtime
+                mtime_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
+                files_found.append({
+                    "path": rel_path,
+                    "full_source_path": full_path,
+                    "size": size_bytes,
+                    "mtime": mtime,
+                    "mtime_str": mtime_str
+                })
+            except Exception:
+                pass
+            
+    # Sort chronologically (oldest first)
+    return sorted(files_found, key=lambda x: x["mtime"])
+
+def run_git_cmd(workspace, args, env=None):
+    """Executes a git command inside the target workspace with custom env."""
+    full_env = os.environ.copy()
+    if env:
+        full_env.update(env)
+    res = subprocess.run(args, cwd=workspace, capture_output=True, text=True, env=full_env)
+    return res.returncode, res.stdout, res.stderr
+
+def main():
+    args = sys.argv[1:]
+    
+    if "--help" in args or "-h" in args:
+        print_help()
+        
+    conv_id = None
+    # Strip any dash options
+    pos_args = [a for a in args if not a.startswith("-")]
+    
+    cwd = os.path.realpath(os.getcwd())
+    
+    if pos_args:
+        conv_id = pos_args[0]
+        print(f"[*] Target session ID specified via CLI: {CLR_CYAN}{conv_id}{CLR_RESET}")
+    else:
+        print(f"[*] No session ID specified. Auto-detecting active session for current directory...")
+        conv_id = get_last_session_for_cwd(cwd)
+        if not conv_id:
+            print(f"{CLR_RED}[-] Error: Could not resolve last active session for current directory ({cwd}).{CLR_RESET}")
+            print("Please specify a session ID explicitly: git-brain <conversation_id>")
+            sys.exit(1)
+        print(f"[+] Found active session ID for CWD: {CLR_CYAN}{conv_id}{CLR_RESET}")
+        
+    brain_dir = os.path.join(BASE_DIR, "brain", conv_id)
+    if not os.path.isdir(brain_dir):
+        print(f"{CLR_RED}[-] Error: Brain directory does not exist for session {conv_id}{CLR_RESET}")
+        sys.exit(1)
+        
+    workspace_mappings = load_workspace_mappings()
+    workspace = workspace_mappings.get(conv_id)
+    
+    if not workspace:
+        # Fallback to current working directory
+        workspace = cwd
+        print(f"{CLR_YELLOW}[!] Warning: Workspace not found in history. Defaulting to CWD: {workspace}{CLR_RESET}")
+    else:
+        workspace = os.path.realpath(workspace)
+        
+    if not os.path.isdir(workspace):
+        print(f"{CLR_RED}[-] Error: Target workspace directory does not exist: {workspace}{CLR_RESET}")
+        sys.exit(1)
+        
+    # Check if target workspace is a Git repository
+    git_dir = os.path.join(workspace, ".git")
+    if not os.path.isdir(git_dir):
+        print(f"{CLR_RED}[-] Error: Target workspace '{workspace}' is not a Git repository.{CLR_RESET}")
+        sys.exit(1)
+        
+    print(f"[*] Project Repository Workspace: {CLR_CYAN}{workspace}{CLR_RESET}")
+    
+    # Collect files
+    brain_files = get_generated_brain_files_detailed(conv_id)
+    if not brain_files:
+        print(f"{CLR_YELLOW}[!] No generated files found for session {conv_id}. Nothing to import.{CLR_RESET}")
+        sys.exit(0)
+        
+    print(f"[*] Found {len(brain_files)} generated files. Committing chronologically...")
+    
+    target_dir = os.path.join(workspace, ".brain")
+    os.makedirs(target_dir, exist_ok=True)
+    
+    committed_count = 0
+    updated_count = 0
+    
+    for f in brain_files:
+        rel_path = f["path"]
+        source_path = f["full_source_path"]
+        dest_path = os.path.join(target_dir, rel_path)
+        
+        # Ensure parent directories exist inside .brain/
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        
+        # Copy the file (preserves timestamps via shutil.copy2)
+        shutil.copy2(source_path, dest_path)
+        
+        # Stage the file in Git
+        git_rel_dest = os.path.relpath(dest_path, workspace)
+        run_git_cmd(workspace, ["git", "add", git_rel_dest])
+        
+        # Check if there are staged differences for this file
+        code, out, err = run_git_cmd(workspace, ["git", "diff", "--cached", "--name-only", git_rel_dest])
+        
+        if git_rel_dest in out.splitlines():
+            # Setup Git author/committer epoch timestamps
+            epoch_time = int(f["mtime"])
+            env = {
+                "GIT_AUTHOR_DATE": f"@{epoch_time}",
+                "GIT_COMMITTER_DATE": f"@{epoch_time}"
+            }
+            commit_msg = f"Import brain file {rel_path} from session {conv_id}"
+            
+            code, out, err = run_git_cmd(workspace, ["git", "commit", "-m", commit_msg], env=env)
+            if code == 0:
+                print(f"{CLR_GREEN}[+] Committed .brain/{rel_path} with original timestamp {f['mtime_str']}{CLR_RESET}")
+                committed_count += 1
+            else:
+                print(f"{CLR_RED}[-] Failed to commit {rel_path}: {err.strip()}{CLR_RESET}")
+        else:
+            print(f"{CLR_DIM}[*] .brain/{rel_path} is already up to date.{CLR_RESET}")
+            updated_count += 1
+            
+    print(f"\n{CLR_BOLD}{CLR_GREEN}[+] Archival completed successfully!{CLR_RESET}")
+    print(f"[*] Summary: {committed_count} file(s) historically committed, {updated_count} file(s) already up to date.")
+
+if __name__ == "__main__":
+    main()
