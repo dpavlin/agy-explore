@@ -53,20 +53,7 @@ def load_workspace_mappings():
 
 def get_last_session_for_cwd(cwd):
     """Finds the last active session ID mapped to the current directory."""
-    # Try reading cache file first
-    cache_path = os.path.join(BASE_DIR, "cache", "last_conversations.json")
-    if os.path.exists(cache_path):
-        try:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                cache_data = json.load(f)
-            # Match current directory (resolved realpath)
-            for ws_path, cid in cache_data.items():
-                if os.path.realpath(ws_path) == cwd:
-                    return cid
-        except Exception:
-            pass
-
-    # Fallback to history.jsonl scan
+    # Try history.jsonl scan first (real-time append-only journal of all sessions)
     history_path = os.path.join(BASE_DIR, "history.jsonl")
     if os.path.exists(history_path):
         try:
@@ -85,6 +72,19 @@ def get_last_session_for_cwd(cwd):
                         continue
             if last_cid:
                 return last_cid
+        except Exception:
+            pass
+
+    # Fallback to cache file next
+    cache_path = os.path.join(BASE_DIR, "cache", "last_conversations.json")
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                cache_data = json.load(f)
+            # Match current directory (resolved realpath)
+            for ws_path, cid in cache_data.items():
+                if os.path.realpath(ws_path) == cwd:
+                    return cid
         except Exception:
             pass
 
