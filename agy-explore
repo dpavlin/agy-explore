@@ -38,7 +38,7 @@ def print_help():
     print("\nOptions:")
     print("  -a, --all      List all conversations (default shows only current directory)")
     print("  -d, --debug    Enable detailed stderr telemetry logging")
-    print("  -v, --verbose  Set verbosity level (-v: show file details/contents, -vv: show tool breakdown/aggregated stats, -vvv: dev telemetry)")
+    print("  -v, --verbose  Set verbosity level (-v: show file details, -vv: show tool breakdown/aggregated stats, -vvv: show full file contents after stats)")
     print("  --first <N>    Specify number of first prompts to show (default: 1)")
     print("  --last <M>     Specify number of last prompts to show (default: 1)")
     print("  --no-color     Disable ANSI color codes")
@@ -321,11 +321,6 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0):
                 print(f"  {CLR_BOLD}Generated Files ({len(brain_files)}):{CLR_RESET}")
                 for f in brain_files:
                     print(f"    {CLR_CYAN}- {f['path']} ({format_size(f['size'])}, {f['mtime_str']}){CLR_RESET}")
-                    if f['is_text'] and f['content'] is not None:
-                        print(f"      {CLR_DIM}--------------------------------------------------------------------------------{CLR_RESET}")
-                        for l in f['content'].splitlines():
-                            print(f"      {CLR_WHITE}{l}{CLR_RESET}")
-                        print(f"      {CLR_DIM}--------------------------------------------------------------------------------{CLR_RESET}")
                 
                 # Display Aggregated Stats at Level 2+
                 if verbosity >= 2:
@@ -372,6 +367,17 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0):
         else:
             print(f"  {CLR_BOLD}{CLR_YELLOW}Restore Active Pointer Command:{CLR_RESET} agy-explore --restore {c['uuid']}")
             print(f"  {CLR_BOLD}{CLR_YELLOW}Resume CLI Interface Command:  {CLR_RESET} agy --conversation {c['uuid']}")
+            
+        # Display full file content at the highest verbosity level (verbosity >= 3), after all stats/prompts/restores are shown
+        if verbosity >= 3 and brain_files:
+            print(f"\n  {CLR_BOLD}Generated Files Content:{CLR_RESET}")
+            for f in brain_files:
+                if f['is_text'] and f['content'] is not None:
+                    print(f"    {CLR_CYAN}[File: {f['path']}]{CLR_RESET}")
+                    print(f"    {CLR_DIM}--------------------------------------------------------------------------------{CLR_RESET}")
+                    for l in f['content'].splitlines():
+                        print(f"    {CLR_WHITE}{l}{CLR_RESET}")
+                    print(f"    {CLR_DIM}--------------------------------------------------------------------------------{CLR_RESET}")
             
     print("\n" + "="*80 + "\n")
 
@@ -540,7 +546,7 @@ def main():
                 v_count = clean_arg.count("v")
                 verbosity = max(verbosity, v_count)
                 
-    DEBUG_MODE = "-d" in args or "--debug" in args or verbosity >= 3
+    DEBUG_MODE = "-d" in args or "--debug" in args
     
     num_first = 1
     num_last = 1
