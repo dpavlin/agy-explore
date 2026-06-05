@@ -68,9 +68,10 @@ agy-explore --restore <conversation_id>
 - `-a`, `--all`: List all conversations globally (by default, only current directory sessions are listed).
 - `-d`, `--debug`: Enable detailed real-time diagnostic logging (emitted to `sys.stderr` for easy redirection).
 - `-v`, `--verbose`: Set progressive verbosity level:
-  - `-v`: Detailed Generated Files list showing relative paths, formatted sizes, and modification times.
+  - `-v`: List generated files.
   - `-vv`: Adds aggregated generated files payload statistics (file count, extension stats, total bytes) and complete tool execution breakdown counts.
-  - `-vvv`: Adds the full text content of all generated text/markdown files, printed cleanly after all stats/prompts/restores are shown.
+  - `-vvv`: Adds detailed file metadata info (relative paths, formatted sizes, and modification times) and enables dev telemetry (debug logs) to stderr.
+  - `-vvvv`: Adds the full text content of all generated text/markdown files, printed cleanly after all stats/prompts/restores are shown.
 - `--first <N>`: Specify the number of first prompts to show for each conversation (default: `1`).
 - `--last <M>`: Specify the number of last prompts to show for each conversation (default: `1`).
 - `--no-color`: Disable ANSI color terminal sequences.
