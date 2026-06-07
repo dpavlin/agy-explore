@@ -70,6 +70,8 @@ agy-explore --restore <conversation_id>
 - `-v`, `--verbose`: Set progressive verbosity level:
   - `-v`: Detailed list of generated files (relative paths, formatted sizes, modification times), tool breakdown counts, and aggregated statistics.
   - `-vv`: Adds the full text content of all generated text/markdown files, printed cleanly after all stats/prompts/restores are shown.
+- `--grep <words>`: Find conversations containing all specified words case-insensitively. Can accept multiple unquoted words.
+- `--turn`: Restrict `--grep` search to match all query words within a single user-assistant turn instead of the entire session.
 - `--first <N>`: Specify the number of first prompts to show for each conversation (default: `1`).
 - `--last <M>`: Specify the number of last prompts to show for each conversation (default: `1`).
 - `--no-color`: Disable ANSI color terminal sequences.

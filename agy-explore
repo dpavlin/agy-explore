@@ -39,6 +39,8 @@ def print_help():
     print("  -a, --all      List all conversations (default shows only current directory)")
     print("  -d, --debug    Enable detailed stderr telemetry logging")
     print("  -v, --verbose  Set verbosity level (-v: show all stats/file details, -vv: show all stats plus full file contents)")
+    print("  --grep <words> Find conversations containing all specified words case-insensitively")
+    print("  --turn         Restrict --grep search to match all words within a single user-assistant turn")
     print("  --first <N>    Specify number of first prompts to show (default: 1)")
     print("  --last <M>     Specify number of last prompts to show (default: 1)")
     print("  --no-color     Disable ANSI color codes")
@@ -111,6 +113,32 @@ def is_text_file(filepath):
     except Exception:
         return False
 
+def extract_searchable_text(step_data):
+    parts = []
+    if step_data.get("content"):
+        parts.append(step_data["content"])
+    if step_data.get("thinking"):
+        parts.append(step_data["thinking"])
+    if step_data.get("tool_calls"):
+        for tc in step_data["tool_calls"]:
+            if tc.get("name"):
+                parts.append(tc["name"])
+            if tc.get("args"):
+                parts.append(json.dumps(tc["args"]))
+    return " ".join(parts)
+
+def highlight_text(text, words, highlight_color=CLR_BOLD + CLR_YELLOW, context_color=CLR_WHITE):
+    if not words or not text:
+        return text
+    try:
+        escaped_words = [re.escape(w) for w in words]
+        escaped_words.sort(key=len, reverse=True)
+        pattern = re.compile(rf"({'|'.join(escaped_words)})", re.IGNORECASE)
+        replacement = f"{highlight_color}\\1{CLR_RESET}{context_color}"
+        return pattern.sub(replacement, text)
+    except Exception:
+        return text
+
 def get_generated_brain_files_detailed(session_uuid):
     session_dir = os.path.join(BASE_DIR, "brain", session_uuid)
     files_found = []
@@ -157,7 +185,7 @@ def get_generated_brain_files_detailed(session_uuid):
             
     return sorted(files_found, key=lambda x: x["path"])
 
-def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0):
+def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, search_words=None, use_turn_matching=False):
     brain_dir = os.path.join(BASE_DIR, "brain")
     debug_log(f"Scanning brain directory: {brain_dir}")
     if not os.path.isdir(brain_dir):
@@ -183,6 +211,11 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0):
     else:
         print(f"[*] Analyzing conversation log(s) for current directory ({cwd})...")
         print(f"[*] (Use '-a' or '--all' to display all workspaces)")
+        
+    if search_words:
+        mode_str = "Turn-restricted" if use_turn_matching else "Session-wide"
+        words_formatted = ", ".join([f"'{w}'" for w in search_words])
+        print(f"[*] Filtered by --grep query: {words_formatted} (Matching Mode: {mode_str})")
     
     for uuid_str in dirs:
         log_path = os.path.join(brain_dir, uuid_str, ".system_generated", "logs", "transcript.jsonl")
@@ -212,6 +245,7 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0):
         total_steps = 0
         tool_breakdown = {}
         
+        is_matched = True
         try:
             debug_log(f"Opening transcript log file: {log_path}")
             with open(log_path, "r", encoding="utf-8") as f:
@@ -219,6 +253,7 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0):
                 total_steps = len(lines)
                 debug_log(f"Read {total_steps} log entries for session {uuid_str}")
                 
+                steps_searchable = []
                 for idx, line in enumerate(lines):
                     data = json.loads(line)
                     created_at_str = data.get("created_at")
@@ -265,9 +300,53 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0):
                             
                         user_prompts.append(clean_content)
                         
+                    # Extract searchable text for matching
+                    steps_searchable.append((source, step_type, extract_searchable_text(data)))
+                    
+                # Match check
+                if search_words:
+                    if use_turn_matching:
+                        turns_text = []
+                        current_turn_parts = []
+                        for src, st_type, text in steps_searchable:
+                            if src == "USER_EXPLICIT" and st_type == "USER_INPUT":
+                                if current_turn_parts:
+                                    turns_text.append(" ".join(current_turn_parts))
+                                    current_turn_parts = []
+                            current_turn_parts.append(text)
+                        if current_turn_parts:
+                            turns_text.append(" ".join(current_turn_parts))
+                            
+                        matched = False
+                        for turn_text in turns_text:
+                            turn_text_lower = turn_text.lower()
+                            turn_matched = True
+                            for word in search_words:
+                                if word.lower() not in turn_text_lower:
+                                    turn_matched = False
+                                    break
+                            if turn_matched:
+                                matched = True
+                                break
+                        is_matched = matched
+                    else:
+                        session_text = " ".join([text for _, _, text in steps_searchable])
+                        session_text_lower = session_text.lower()
+                        matched = True
+                        for word in search_words:
+                            if word.lower() not in session_text_lower:
+                                matched = False
+                                break
+                        is_matched = matched
+                        
         except Exception as e:
             debug_log(f"Error processing {uuid_str}: {e}")
             print(f"[!] Error processing {uuid_str}: {e}")
+            is_matched = False
+            
+        if not is_matched:
+            debug_log(f"Session {uuid_str} did not match grep filter.")
+            continue
             
         duration_str = "N/A"
         if start_time and end_time:
@@ -316,11 +395,13 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0):
         if brain_files:
             if verbosity == 0:
                 files_str = ", ".join([f["path"] for f in brain_files])
-                print(f"  {CLR_BOLD}Generated Files:  {CLR_RESET} {CLR_CYAN}{files_str}{CLR_RESET}")
+                files_str_hl = highlight_text(files_str, search_words, CLR_BOLD + CLR_YELLOW, CLR_CYAN)
+                print(f"  {CLR_BOLD}Generated Files:  {CLR_RESET} {CLR_CYAN}{files_str_hl}{CLR_RESET}")
             else:
                 print(f"  {CLR_BOLD}Generated Files ({len(brain_files)}):{CLR_RESET}")
                 for f in brain_files:
-                    print(f"    {CLR_CYAN}- {f['path']} ({format_size(f['size'])}, {f['mtime_str']}){CLR_RESET}")
+                    path_hl = highlight_text(f['path'], search_words, CLR_BOLD + CLR_YELLOW, CLR_CYAN)
+                    print(f"    {CLR_CYAN}- {path_hl} ({format_size(f['size'])}, {f['mtime_str']}){CLR_RESET}")
                 
                 # Display Aggregated Stats
                 exts = [f["ext"] for f in brain_files]
@@ -335,26 +416,30 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0):
         # Extract first N prompts
         if num_first == 1:
             val = f"\"{user_prompts[0]}\"" if user_prompts else "\"N/A\""
-            print(f"  {CLR_BOLD}First Prompt:     {CLR_RESET} {CLR_WHITE}{val}{CLR_RESET}")
+            val_hl = highlight_text(val, search_words, CLR_BOLD + CLR_YELLOW, CLR_WHITE)
+            print(f"  {CLR_BOLD}First Prompt:     {CLR_RESET} {CLR_WHITE}{val_hl}{CLR_RESET}")
         elif num_first > 1:
             first_subset = user_prompts[:num_first]
             if first_subset:
                 print(f"  {CLR_BOLD}First Prompts ({len(first_subset)}):{CLR_RESET}")
                 for p in first_subset:
-                    print(f"    {CLR_DIM}-{CLR_RESET} {CLR_WHITE}\"{p}\"{CLR_RESET}")
+                    p_hl = highlight_text(p, search_words, CLR_BOLD + CLR_YELLOW, CLR_WHITE)
+                    print(f"    {CLR_DIM}-{CLR_RESET} {CLR_WHITE}\"{p_hl}\"{CLR_RESET}")
             else:
                 print(f"  {CLR_BOLD}First Prompts:    {CLR_RESET} {CLR_WHITE}\"N/A\"{CLR_RESET}")
                 
         # Extract last M prompts
         if num_last == 1:
             val = f"\"{user_prompts[-1]}\"" if user_prompts else "\"N/A\""
-            print(f"  {CLR_BOLD}Last Prompt:      {CLR_RESET} {CLR_WHITE}{val}{CLR_RESET}")
+            val_hl = highlight_text(val, search_words, CLR_BOLD + CLR_YELLOW, CLR_WHITE)
+            print(f"  {CLR_BOLD}Last Prompt:      {CLR_RESET} {CLR_WHITE}{val_hl}{CLR_RESET}")
         elif num_last > 1:
             last_subset = user_prompts[-num_last:]
             if last_subset:
                 print(f"  {CLR_BOLD}Last Prompts ({len(last_subset)}):{CLR_RESET}")
                 for p in last_subset:
-                    print(f"    {CLR_DIM}-{CLR_RESET} {CLR_WHITE}\"{p}\"{CLR_RESET}")
+                    p_hl = highlight_text(p, search_words, CLR_BOLD + CLR_YELLOW, CLR_WHITE)
+                    print(f"    {CLR_DIM}-{CLR_RESET} {CLR_WHITE}\"{p_hl}\"{CLR_RESET}")
             else:
                 print(f"  {CLR_BOLD}Last Prompts:     {CLR_RESET} {CLR_WHITE}\"N/A\"{CLR_RESET}")
         
@@ -365,20 +450,23 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0):
             print(f"  {CLR_BOLD}{CLR_YELLOW}Resume CLI Interface Command:  {CLR_RESET} {CLR_BOLD}{restore_cmd}{CLR_RESET}")
         else:
             print(f"  {CLR_BOLD}{CLR_YELLOW}Restore Active Pointer Command:{CLR_RESET} agy-explore --restore {c['uuid']}")
-            print(f"  {CLR_BOLD}{CLR_YELLOW}Resume CLI Interface Command:  {CLR_RESET} agy --conversation {c['uuid']}")
+            print(f"  {CLR_BOLD}{CLR_YELLOW}Resume CLI Interface Command:  {CLR_RESET} {CLR_BOLD}{restore_cmd}{CLR_RESET}")
             
         # Display full file content at verbosity level 2+ (-vv), after all stats/prompts/restores are shown
         if verbosity >= 2 and brain_files:
             print(f"\n  {CLR_BOLD}Generated Files Content:{CLR_RESET}")
             for f in brain_files:
                 if f['is_text'] and f['content'] is not None:
-                    print(f"    {CLR_CYAN}[File: {f['path']}]{CLR_RESET}")
+                    path_hl = highlight_text(f['path'], search_words, CLR_BOLD + CLR_YELLOW, CLR_CYAN)
+                    print(f"    {CLR_CYAN}[File: {path_hl}]{CLR_RESET}")
                     print(f"    {CLR_DIM}--------------------------------------------------------------------------------{CLR_RESET}")
                     for l in f['content'].splitlines():
-                        print(f"    {CLR_WHITE}{l}{CLR_RESET}")
+                        l_hl = highlight_text(l, search_words, CLR_BOLD + CLR_YELLOW, CLR_WHITE)
+                        print(f"    {CLR_WHITE}{l_hl}{CLR_RESET}")
                     print(f"    {CLR_DIM}--------------------------------------------------------------------------------{CLR_RESET}")
             
     print("\n" + "="*80 + "\n")
+
 
 def restore_conversation(conv_id):
     """Restores the given conversation ID to its associated workspace in the last_conversations cache."""
@@ -578,6 +666,31 @@ def main():
             
     debug_log(f"Starting agy-explore. Arguments: {args}")
     debug_log(f"Options parsed - show_all: {show_all}, use_color: {use_color}, show_thoughts: {show_thoughts}, show_tools: {show_tools}, debug: {DEBUG_MODE}, num_first: {num_first}, num_last: {num_last}, verbosity: {verbosity}")
+    
+    # Parse grep options and search terms
+    search_words = []
+    use_turn_matching = "--turn" in args or "--grep-turn" in args
+    
+    if "--grep" in args:
+        idx = args.index("--grep")
+        grep_terms = []
+        for arg in args[idx+1:]:
+            if arg.startswith("-"):
+                break
+            grep_terms.append(arg)
+        for term in grep_terms:
+            search_words.extend([w.strip() for w in term.split() if w.strip()])
+            
+        debug_log(f"Grep search enabled. Words: {search_words}, Turn-matching: {use_turn_matching}")
+        list_conversations(
+            show_all=show_all,
+            num_first=num_first,
+            num_last=num_last,
+            verbosity=verbosity,
+            search_words=search_words,
+            use_turn_matching=use_turn_matching
+        )
+        sys.exit(0)
     
     # Check for --restore option
     if "--restore" in args:
