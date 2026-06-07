@@ -305,6 +305,7 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
                     
                 # Match check
                 matched_snippets = []
+                total_matches = 0
                 if search_words:
                     if use_turn_matching:
                         turns_text = []
@@ -342,36 +343,84 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
                         
                     # Extract matched snippets
                     if is_matched:
+                        candidates = []
                         for src, st_type, text, step_num in steps_searchable:
-                            text_lower = text.lower()
-                            step_matches = [w for w in search_words if w.lower() in text_lower]
-                            if step_matches:
-                                lines = text.splitlines()
-                                matched_lines_in_step = 0
-                                for line in lines:
-                                    line_stripped = line.strip()
-                                    if not line_stripped:
-                                        continue
-                                    line_lower = line_stripped.lower()
-                                    if any(w.lower() in line_lower for w in search_words):
-                                        line_hl = highlight_text(line_stripped, search_words, CLR_BOLD + CLR_YELLOW, CLR_WHITE)
-                                        
-                                        desc = ""
-                                        if src == "USER_EXPLICIT" and st_type == "USER_INPUT":
-                                            desc = "User Prompt"
-                                        elif src == "MODEL":
-                                            if st_type == "PLANNER_RESPONSE":
-                                                desc = "Assistant Response"
-                                            else:
-                                                desc = "Assistant Thought"
-                                        else:
-                                            desc = st_type.replace("_", " ").title()
-                                            
-                                        matched_snippets.append(f"    {CLR_DIM}[Step {step_num} | {desc}]{CLR_RESET} {CLR_WHITE}{line_hl}{CLR_RESET}")
-                                        matched_lines_in_step += 1
-                                        if matched_lines_in_step >= 3:
-                                            matched_snippets.append(f"    {CLR_DIM}[Step {step_num} | {desc}]{CLR_RESET} {CLR_DIM}... (more matches in this step) ...{CLR_RESET}")
-                                            break
+                            desc = ""
+                            if src == "USER_EXPLICIT" and st_type == "USER_INPUT":
+                                desc = "User Prompt"
+                            elif src == "MODEL":
+                                if st_type == "PLANNER_RESPONSE":
+                                    desc = "Assistant Response"
+                                else:
+                                    desc = "Assistant Thought"
+                            else:
+                                desc = st_type.replace("_", " ").title()
+
+                            lines = text.splitlines()
+                            for line in lines:
+                                line_stripped = line.strip()
+                                if not line_stripped:
+                                    continue
+                                line_lower = line_stripped.lower()
+                                matched_words = {w for w in search_words if w.lower() in line_lower}
+                                if matched_words:
+                                    total_matches += 1
+                                    candidates.append({
+                                        "step_num": step_num,
+                                        "desc": desc,
+                                        "line": line_stripped,
+                                        "matched_words": matched_words,
+                                        "index": len(candidates)
+                                    })
+
+                        selected_candidates = []
+                        uncovered_words = set(search_words)
+                        
+                        # Pass 1: cover as many uncovered words as possible
+                        while len(selected_candidates) < 10 and uncovered_words:
+                            best_cand = None
+                            best_cover_count = 0
+                            for cand in candidates:
+                                if cand in selected_candidates:
+                                    continue
+                                cover_count = len(cand["matched_words"] & uncovered_words)
+                                if cover_count > best_cover_count:
+                                    best_cover_count = cover_count
+                                    best_cand = cand
+                                elif cover_count == best_cover_count and best_cover_count > 0:
+                                    if best_cand is None:
+                                        best_cand = cand
+                                    else:
+                                        cand_total = len(cand["matched_words"])
+                                        best_total = len(best_cand["matched_words"])
+                                        if cand_total > best_total:
+                                            best_cand = cand
+                                        elif cand_total == best_total:
+                                            if cand["index"] < best_cand["index"]:
+                                                best_cand = cand
+                                                
+                            if best_cand is None or best_cover_count == 0:
+                                break
+                                
+                            selected_candidates.append(best_cand)
+                            uncovered_words -= best_cand["matched_words"]
+                            
+                        # Pass 2: fill remaining slots up to 10
+                        if len(selected_candidates) < 10:
+                            for cand in candidates:
+                                if len(selected_candidates) >= 10:
+                                    break
+                                if cand not in selected_candidates:
+                                    selected_candidates.append(cand)
+                                    
+                        # Sort chronologically
+                        selected_candidates.sort(key=lambda x: x["index"])
+                        
+                        for cand in selected_candidates:
+                            line_hl = highlight_text(cand["line"], search_words, CLR_BOLD + CLR_YELLOW, CLR_WHITE)
+                            matched_snippets.append(
+                                f"    {CLR_DIM}[Step {cand['step_num']} | {cand['desc']}]{CLR_RESET} {CLR_WHITE}{line_hl}{CLR_RESET}"
+                            )
                         
         except Exception as e:
             debug_log(f"Error processing {uuid_str}: {e}")
@@ -401,7 +450,8 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
             "workspace": workspace,
             "brain_files": brain_files,
             "tool_breakdown": tool_breakdown,
-            "matched_snippets": matched_snippets
+            "matched_snippets": matched_snippets,
+            "total_matches": total_matches
         })
         
     # Sort by mtime descending
@@ -489,12 +539,13 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
             
         # Display Matched Snippets
         matched_snippets = c.get("matched_snippets", [])
+        total_matches = c.get("total_matches", len(matched_snippets))
         if matched_snippets:
-            print(f"  {CLR_BOLD}Matched Snippets ({len(matched_snippets)}):{CLR_RESET}")
-            for snip in matched_snippets[:10]:
+            print(f"  {CLR_BOLD}Matched Snippets ({total_matches}):{CLR_RESET}")
+            for snip in matched_snippets:
                 print(snip)
-            if len(matched_snippets) > 10:
-                print(f"    {CLR_DIM}... and {len(matched_snippets) - 10} more matching lines ...{CLR_RESET}")
+            if total_matches > len(matched_snippets):
+                print(f"    {CLR_DIM}... and {total_matches - len(matched_snippets)} more matching lines ...{CLR_RESET}")
                 
         # Display full file content at verbosity level 2+ (-vv), after all stats/prompts/restores are shown
         if verbosity >= 2 and brain_files:
