@@ -301,14 +301,15 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
                         user_prompts.append(clean_content)
                         
                     # Extract searchable text for matching
-                    steps_searchable.append((source, step_type, extract_searchable_text(data)))
+                    steps_searchable.append((source, step_type, extract_searchable_text(data), idx + 1))
                     
                 # Match check
+                matched_snippets = []
                 if search_words:
                     if use_turn_matching:
                         turns_text = []
                         current_turn_parts = []
-                        for src, st_type, text in steps_searchable:
+                        for src, st_type, text, step_num in steps_searchable:
                             if src == "USER_EXPLICIT" and st_type == "USER_INPUT":
                                 if current_turn_parts:
                                     turns_text.append(" ".join(current_turn_parts))
@@ -330,7 +331,7 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
                                 break
                         is_matched = matched
                     else:
-                        session_text = " ".join([text for _, _, text in steps_searchable])
+                        session_text = " ".join([text for _, _, text, _ in steps_searchable])
                         session_text_lower = session_text.lower()
                         matched = True
                         for word in search_words:
@@ -338,6 +339,39 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
                                 matched = False
                                 break
                         is_matched = matched
+                        
+                    # Extract matched snippets
+                    if is_matched:
+                        for src, st_type, text, step_num in steps_searchable:
+                            text_lower = text.lower()
+                            step_matches = [w for w in search_words if w.lower() in text_lower]
+                            if step_matches:
+                                lines = text.splitlines()
+                                matched_lines_in_step = 0
+                                for line in lines:
+                                    line_stripped = line.strip()
+                                    if not line_stripped:
+                                        continue
+                                    line_lower = line_stripped.lower()
+                                    if any(w.lower() in line_lower for w in search_words):
+                                        line_hl = highlight_text(line_stripped, search_words, CLR_BOLD + CLR_YELLOW, CLR_WHITE)
+                                        
+                                        desc = ""
+                                        if src == "USER_EXPLICIT" and st_type == "USER_INPUT":
+                                            desc = "User Prompt"
+                                        elif src == "MODEL":
+                                            if st_type == "PLANNER_RESPONSE":
+                                                desc = "Assistant Response"
+                                            else:
+                                                desc = "Assistant Thought"
+                                        else:
+                                            desc = st_type.replace("_", " ").title()
+                                            
+                                        matched_snippets.append(f"    {CLR_DIM}[Step {step_num} | {desc}]{CLR_RESET} {CLR_WHITE}{line_hl}{CLR_RESET}")
+                                        matched_lines_in_step += 1
+                                        if matched_lines_in_step >= 3:
+                                            matched_snippets.append(f"    {CLR_DIM}[Step {step_num} | {desc}]{CLR_RESET} {CLR_DIM}... (more matches in this step) ...{CLR_RESET}")
+                                            break
                         
         except Exception as e:
             debug_log(f"Error processing {uuid_str}: {e}")
@@ -366,7 +400,8 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
             "thoughts": thought_count,
             "workspace": workspace,
             "brain_files": brain_files,
-            "tool_breakdown": tool_breakdown
+            "tool_breakdown": tool_breakdown,
+            "matched_snippets": matched_snippets
         })
         
     # Sort by mtime descending
@@ -452,6 +487,15 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
             print(f"  {CLR_BOLD}{CLR_YELLOW}Restore Active Pointer Command:{CLR_RESET} agy-explore --restore {c['uuid']}")
             print(f"  {CLR_BOLD}{CLR_YELLOW}Resume CLI Interface Command:  {CLR_RESET} {CLR_BOLD}{restore_cmd}{CLR_RESET}")
             
+        # Display Matched Snippets
+        matched_snippets = c.get("matched_snippets", [])
+        if matched_snippets:
+            print(f"  {CLR_BOLD}Matched Snippets ({len(matched_snippets)}):{CLR_RESET}")
+            for snip in matched_snippets[:10]:
+                print(snip)
+            if len(matched_snippets) > 10:
+                print(f"    {CLR_DIM}... and {len(matched_snippets) - 10} more matching lines ...{CLR_RESET}")
+                
         # Display full file content at verbosity level 2+ (-vv), after all stats/prompts/restores are shown
         if verbosity >= 2 and brain_files:
             print(f"\n  {CLR_BOLD}Generated Files Content:{CLR_RESET}")
