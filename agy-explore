@@ -133,7 +133,7 @@ def highlight_text(text, words, highlight_color=CLR_BOLD + CLR_YELLOW, context_c
     try:
         escaped_words = [re.escape(w) for w in words]
         escaped_words.sort(key=len, reverse=True)
-        pattern = re.compile(rf"({'|'.join(escaped_words)})", re.IGNORECASE)
+        pattern = re.compile(rf"\b({'|'.join(escaped_words)})", re.IGNORECASE)
         replacement = f"{highlight_color}\\1{CLR_RESET}{context_color}"
         return pattern.sub(replacement, text)
     except Exception:
@@ -321,10 +321,9 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
                             
                         matched = False
                         for turn_text in turns_text:
-                            turn_text_lower = turn_text.lower()
                             turn_matched = True
                             for word in search_words:
-                                if word.lower() not in turn_text_lower:
+                                if not re.search(rf"\b{re.escape(word)}", turn_text, re.IGNORECASE):
                                     turn_matched = False
                                     break
                             if turn_matched:
@@ -333,10 +332,9 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
                         is_matched = matched
                     else:
                         session_text = " ".join([text for _, _, text, _ in steps_searchable])
-                        session_text_lower = session_text.lower()
                         matched = True
                         for word in search_words:
-                            if word.lower() not in session_text_lower:
+                            if not re.search(rf"\b{re.escape(word)}", session_text, re.IGNORECASE):
                                 matched = False
                                 break
                         is_matched = matched
@@ -361,8 +359,7 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
                                 line_stripped = line.strip()
                                 if not line_stripped:
                                     continue
-                                line_lower = line_stripped.lower()
-                                matched_words = {w for w in search_words if w.lower() in line_lower}
+                                matched_words = {w for w in search_words if re.search(rf"\b{re.escape(w)}", line_stripped, re.IGNORECASE)}
                                 if matched_words:
                                     total_matches += 1
                                     candidates.append({
