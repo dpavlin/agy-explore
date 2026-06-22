@@ -255,7 +255,11 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
                 
                 steps_searchable = []
                 for idx, line in enumerate(lines):
-                    data = json.loads(line)
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError as ex:
+                        debug_log(f"JSON decode failed on transcript line {idx + 1} of session {uuid_str}: {ex}")
+                        continue
                     created_at_str = data.get("created_at")
                     
                     # Convert created_at to timestamp
@@ -585,7 +589,11 @@ def restore_conversation(conv_id):
                         if not line.strip():
                             continue
                         line_idx += 1
-                        data = json.loads(line)
+                        try:
+                            data = json.loads(line)
+                        except json.JSONDecodeError as ex:
+                            debug_log(f"JSON decode failed on fallback scan line {line_idx}: {ex}")
+                            continue
                         content = data.get("content", "")
                         if "Workspace:" in content or "active workspaces" in content:
                             # Try simple extraction
