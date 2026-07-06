@@ -218,9 +218,11 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
         print(f"[*] Filtered by --grep query: {words_formatted} (Matching Mode: {mode_str})")
     
     for uuid_str in dirs:
-        log_path = os.path.join(brain_dir, uuid_str, ".system_generated", "logs", "transcript.jsonl")
+        log_path = os.path.join(brain_dir, uuid_str, ".system_generated", "logs", "transcript_full.jsonl")
         if not os.path.exists(log_path):
-            debug_log(f"Skipping directory {uuid_str}: transcript.jsonl not found")
+            log_path = os.path.join(brain_dir, uuid_str, ".system_generated", "logs", "transcript.jsonl")
+        if not os.path.exists(log_path):
+            debug_log(f"Skipping directory {uuid_str}: no transcript log found")
             continue
             
         workspace = workspace_mappings.get(uuid_str, "Unknown Workspace")
@@ -535,6 +537,7 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
             print(f"  {CLR_BOLD}{CLR_YELLOW}Restore Active Pointer Command:{CLR_RESET} agy-explore --restore {c['uuid']}")
             print(f"  {CLR_BOLD}{CLR_YELLOW}Resume CLI Interface Command:  {CLR_RESET} {CLR_BOLD}{restore_cmd}{CLR_RESET}")
         else:
+            restore_cmd = f"agy --conversation {c['uuid']}"
             print(f"  {CLR_BOLD}{CLR_YELLOW}Restore Active Pointer Command:{CLR_RESET} agy-explore --restore {c['uuid']}")
             print(f"  {CLR_BOLD}{CLR_YELLOW}Resume CLI Interface Command:  {CLR_RESET} {CLR_BOLD}{restore_cmd}{CLR_RESET}")
             
@@ -579,7 +582,9 @@ def restore_conversation(conv_id):
     
     if not workspace:
         # Let's fallback to search inside the transcript log for project path or user path
-        log_path = os.path.join(brain_dir, ".system_generated", "logs", "transcript.jsonl")
+        log_path = os.path.join(brain_dir, ".system_generated", "logs", "transcript_full.jsonl")
+        if not os.path.exists(log_path):
+            log_path = os.path.join(brain_dir, ".system_generated", "logs", "transcript.jsonl")
         debug_log(f"Mapping not found in history.jsonl. Performing fallback search in transcript: {log_path}")
         if os.path.exists(log_path):
             try:
@@ -835,7 +840,9 @@ def main():
         sys.exit(0)
         
     # Check if target is a UUID matching a brain conversation folder
-    brain_path = os.path.join(BASE_DIR, "brain", target, ".system_generated", "logs", "transcript.jsonl")
+    brain_path = os.path.join(BASE_DIR, "brain", target, ".system_generated", "logs", "transcript_full.jsonl")
+    if not os.path.exists(brain_path):
+        brain_path = os.path.join(BASE_DIR, "brain", target, ".system_generated", "logs", "transcript.jsonl")
     debug_log(f"Checking brain transcript path: '{brain_path}'")
     if os.path.exists(brain_path):
         debug_log(f"Target matches brain path. Rendering transcript: {brain_path}")
@@ -849,7 +856,9 @@ def main():
         debug_log(f"Target matches pb path. Redirecting.")
         print(f"{CLR_YELLOW}[!] Found binary state file at {pb_path}.{CLR_RESET}")
         print(f"[*] Redirecting automatically to the JSONL log file under brain directory...")
-        redirect_path = os.path.join(BASE_DIR, "brain", target, ".system_generated", "logs", "transcript.jsonl")
+        redirect_path = os.path.join(BASE_DIR, "brain", target, ".system_generated", "logs", "transcript_full.jsonl")
+        if not os.path.exists(redirect_path):
+            redirect_path = os.path.join(BASE_DIR, "brain", target, ".system_generated", "logs", "transcript.jsonl")
         debug_log(f"Redirecting to: {redirect_path}")
         if os.path.exists(redirect_path):
             render_transcript(redirect_path, use_color, show_thoughts, show_tools)
