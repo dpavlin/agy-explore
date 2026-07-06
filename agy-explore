@@ -849,12 +849,14 @@ def main():
         render_transcript(brain_path, use_color, show_thoughts, show_tools)
         sys.exit(0)
         
-    # Check if target is a UUID matching a conversations pb file
+    # Check if target is a UUID matching a conversations pb or db file
     pb_path = os.path.join(BASE_DIR, "conversations", f"{target}.pb")
-    debug_log(f"Checking conversations pb path: '{pb_path}'")
-    if os.path.exists(pb_path):
-        debug_log(f"Target matches pb path. Redirecting.")
-        print(f"{CLR_YELLOW}[!] Found binary state file at {pb_path}.{CLR_RESET}")
+    db_path = os.path.join(BASE_DIR, "conversations", f"{target}.db")
+    debug_log(f"Checking conversations path: '{pb_path}' or '{db_path}'")
+    if os.path.exists(pb_path) or os.path.exists(db_path):
+        found_path = pb_path if os.path.exists(pb_path) else db_path
+        debug_log(f"Target matches state file '{found_path}'. Redirecting.")
+        print(f"{CLR_YELLOW}[!] Found binary state file at {found_path}.{CLR_RESET}")
         print(f"[*] Redirecting automatically to the JSONL log file under brain directory...")
         redirect_path = os.path.join(BASE_DIR, "brain", target, ".system_generated", "logs", "transcript_full.jsonl")
         if not os.path.exists(redirect_path):
