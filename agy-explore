@@ -41,6 +41,7 @@ def print_help():
     print("  -v, --verbose  Set verbosity level (-v: show all stats/file details, -vv: show all stats plus full file contents)")
     print("  --grep <words> Find conversations containing all specified words case-insensitively")
     print("  --turn         Restrict --grep search to match all words within a single user-assistant turn")
+    print("  --search-all   Search all fields (thoughts, tool outputs) instead of just dialogue")
     print("  --first <N>    Specify number of first prompts to show (default: 1)")
     print("  --last <M>     Specify number of last prompts to show (default: 1)")
     print("  --no-color     Disable ANSI color codes")
@@ -113,18 +114,28 @@ def is_text_file(filepath):
     except Exception:
         return False
 
-def extract_searchable_text(step_data):
+def extract_searchable_text(step_data, search_all=False):
     parts = []
-    if step_data.get("content"):
-        parts.append(step_data["content"])
-    if step_data.get("thinking"):
-        parts.append(step_data["thinking"])
-    if step_data.get("tool_calls"):
-        for tc in step_data["tool_calls"]:
-            if tc.get("name"):
-                parts.append(tc["name"])
-            if tc.get("args"):
-                parts.append(json.dumps(tc["args"]))
+    source = step_data.get("source")
+    step_type = step_data.get("type")
+    
+    if search_all:
+        if step_data.get("content"):
+            parts.append(step_data["content"])
+        if step_data.get("thinking"):
+            parts.append(step_data["thinking"])
+        if step_data.get("tool_calls"):
+            for tc in step_data["tool_calls"]:
+                if tc.get("name"):
+                    parts.append(tc["name"])
+                if tc.get("args"):
+                    parts.append(json.dumps(tc["args"]))
+    else:
+        is_user_input = (source == "USER_EXPLICIT" and step_type == "USER_INPUT")
+        is_assistant_response = (source == "MODEL" and step_type == "PLANNER_RESPONSE")
+        if (is_user_input or is_assistant_response) and step_data.get("content"):
+            parts.append(step_data["content"])
+            
     return " ".join(parts)
 
 def highlight_text(text, words, highlight_color=CLR_BOLD + CLR_YELLOW, context_color=CLR_WHITE):
@@ -185,7 +196,7 @@ def get_generated_brain_files_detailed(session_uuid):
             
     return sorted(files_found, key=lambda x: x["path"])
 
-def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, search_words=None, use_turn_matching=False):
+def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, search_words=None, use_turn_matching=False, search_all=False):
     brain_dir = os.path.join(BASE_DIR, "brain")
     debug_log(f"Scanning brain directory: {brain_dir}")
     if not os.path.isdir(brain_dir):
@@ -307,7 +318,7 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
                         user_prompts.append(clean_content)
                         
                     # Extract searchable text for matching
-                    steps_searchable.append((source, step_type, extract_searchable_text(data), idx + 1))
+                    steps_searchable.append((source, step_type, extract_searchable_text(data, search_all), idx + 1))
                     
                 # Match check
                 matched_snippets = []
@@ -775,6 +786,7 @@ def main():
     # Parse grep options and search terms
     search_words = []
     use_turn_matching = "--turn" in args or "--grep-turn" in args
+    search_all = "--search-all" in args or "--all-fields" in args
     
     if "--grep" in args:
         idx = args.index("--grep")
@@ -793,7 +805,8 @@ def main():
             num_last=num_last,
             verbosity=verbosity,
             search_words=search_words,
-            use_turn_matching=use_turn_matching
+            use_turn_matching=use_turn_matching,
+            search_all=search_all
         )
         sys.exit(0)
     
