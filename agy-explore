@@ -532,14 +532,14 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
                 print(f"  {CLR_BOLD}Last Prompts:     {CLR_RESET} {CLR_WHITE}\"N/A\"{CLR_RESET}")
         
         # Output restore command instructions
+        print(f"  {CLR_BOLD}{CLR_YELLOW}Restore Session:{CLR_RESET}")
+        print(f"    1. Mark session active: {CLR_CYAN}agy-explore --restore {c['uuid']}{CLR_RESET}")
         if c['workspace'] != "Unknown Workspace":
             restore_cmd = f"cd {c['workspace']} && agy --conversation {c['uuid']}"
-            print(f"  {CLR_BOLD}{CLR_YELLOW}Restore Active Pointer Command:{CLR_RESET} agy-explore --restore {c['uuid']}")
-            print(f"  {CLR_BOLD}{CLR_YELLOW}Resume CLI Interface Command:  {CLR_RESET} {CLR_BOLD}{restore_cmd}{CLR_RESET}")
+            print(f"    2. Resume CLI session:  {CLR_BOLD}{restore_cmd}{CLR_RESET}")
         else:
             restore_cmd = f"agy --conversation {c['uuid']}"
-            print(f"  {CLR_BOLD}{CLR_YELLOW}Restore Active Pointer Command:{CLR_RESET} agy-explore --restore {c['uuid']}")
-            print(f"  {CLR_BOLD}{CLR_YELLOW}Resume CLI Interface Command:  {CLR_RESET} {CLR_BOLD}{restore_cmd}{CLR_RESET}")
+            print(f"    2. Resume CLI session:  {CLR_BOLD}{restore_cmd}{CLR_RESET}")
             
         # Display Matched Snippets
         matched_snippets = c.get("matched_snippets", [])
