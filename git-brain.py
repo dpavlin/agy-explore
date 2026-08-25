@@ -17,7 +17,7 @@ CLR_BLUE = "\033[34m"
 CLR_CYAN = "\033[36m"
 CLR_WHITE = "\033[37m"
 
-BASE_DIR = "/home/dpavlin/.gemini/antigravity-cli"
+BASE_DIR = os.path.expanduser("~/.gemini/antigravity-cli")
 
 def print_help():
     print(f"{CLR_BOLD}git-brain: Archive Antigravity Session Artifacts to Git{CLR_RESET}")
