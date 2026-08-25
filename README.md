@@ -27,7 +27,7 @@ chmod +x ~/.local/bin/agy-explore
 Note: The `cp` command above renames the file to `agy-explore` (without `.py`) in your bin directory for cleaner command-line usage. Alternatively, you can symlink it:
 
 ```bash
-ln -s $(pwd)/agy-explore.py ~/.local/bin/agy-explore
+ln -s "$(pwd)/agy-explore.py" ~/.local/bin/agy-explore
 ```
 
 Now you can type `agy-` in your terminal and press `<TAB>` for automatic tab completion!
