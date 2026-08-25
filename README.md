@@ -17,11 +17,17 @@ It aggregates statistics, active time spans, workspace directories, tool executi
 
 ## Installation
 
-Simply copy or link `agy-explore` into your system path (e.g. `~/.local/bin/` or `/usr/local/bin/`) and mark it as executable:
+Simply copy or link `agy-explore.py` into your system path (e.g. `~/.local/bin/` or `/usr/local/bin/`) and mark it as executable:
 
 ```bash
-cp agy-explore ~/.local/bin/
+cp agy-explore.py ~/.local/bin/agy-explore
 chmod +x ~/.local/bin/agy-explore
+```
+
+Note: The `cp` command above renames the file to `agy-explore` (without `.py`) in your bin directory for cleaner command-line usage. Alternatively, you can symlink it:
+
+```bash
+ln -s $(pwd)/agy-explore.py ~/.local/bin/agy-explore
 ```
 
 Now you can type `agy-` in your terminal and press `<TAB>` for automatic tab completion!
