@@ -17,7 +17,7 @@ CLR_MAGENTA = "\033[35m"
 CLR_CYAN = "\033[36m"
 CLR_WHITE = "\033[37m"
 
-BASE_DIR = "/home/dpavlin/.gemini/antigravity-cli"
+BASE_DIR = os.path.expanduser("~/.gemini/antigravity-cli")
 
 DEBUG_MODE = False
 
@@ -624,7 +624,7 @@ def restore_conversation(conv_id):
                 
     if not workspace:
         # Default fallback to home or ask user
-        workspace = "/home/dpavlin"
+        workspace = os.path.expanduser("~")
         debug_log(f"Fallback workspace matching failed. Defaulting workspace pointer to: {workspace}")
         print(f"{CLR_YELLOW}[!] Warning: Workspace not mapped in logs. Defaulting pointer to {workspace}.{CLR_RESET}")
         
