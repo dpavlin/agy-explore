@@ -8,7 +8,7 @@ when you want to switch accounts.
 
 Commands:
   agy-switch.py list                 # List saved accounts and active one
-  agy-switch.py save <name>          # Save current ~/.gemini auth as <name>
+  agy-switch.py save <name>          # Save current live auth (keyring/file) as <name>
   agy-switch.py switch <name>        # Activate account <name> in ~/.gemini
   agy-switch.py login <name>         # Launch agy in isolated temp dir, then save auth
   agy-switch.py whoami               # Show currently active Google identity in ~/.gemini
@@ -21,6 +21,8 @@ import base64
 import shutil
 import tempfile
 import argparse
+import urllib.request
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -51,20 +53,70 @@ def decode_jwt(jwt_str: str) -> dict | None:
         return None
 
 
-def get_token_identity(token_path: Path) -> dict:
-    if not token_path.is_file():
-        return {"email": None, "status": "no_token"}
+def fetch_google_userinfo(access_token: str) -> dict | None:
+    if not access_token:
+        return None
+    req = urllib.request.Request(
+        "https://www.googleapis.com/oauth2/v2/userinfo",
+        headers={"Authorization": f"Bearer {access_token}", "User-Agent": "agy-switch"},
+    )
     try:
-        data = json.loads(token_path.read_text(encoding="utf-8"))
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            return json.loads(resp.read().decode("utf-8", errors="ignore"))
     except Exception as exc:
-        return {"email": None, "status": f"invalid_json: {exc}"}
+        log_debug(f"Failed to fetch Google UserInfo: {exc}")
+        return None
+
+
+def get_keyring_antigravity_token() -> str | None:
+    try:
+        import dbus  # type: ignore
+
+        bus = dbus.SessionBus()
+        service = bus.get_object("org.freedesktop.secrets", "/org/freedesktop/secrets")
+        collection = bus.get_object("org.freedesktop.secrets", "/org/freedesktop/secrets/aliases/default")
+        items = collection.Get(
+            "org.freedesktop.Secret.Collection", "Items", dbus_interface="org.freedesktop.DBus.Properties"
+        )
+        sec_svc = dbus.Interface(service, "org.freedesktop.Secret.Service")
+        _, session_path = sec_svc.OpenSession("plain", dbus.String("", variant_level=1))
+
+        for item_path in items:
+            item = bus.get_object("org.freedesktop.secrets", item_path)
+            attrs = item.Get(
+                "org.freedesktop.Secret.Item", "Attributes", dbus_interface="org.freedesktop.DBus.Properties"
+            )
+            if attrs.get("service") == "gemini" and attrs.get("username") == "antigravity":
+                secret_struct = item.GetSecret(session_path, dbus_interface="org.freedesktop.Secret.Item")
+                return bytes(secret_struct[2]).decode("utf-8")
+    except Exception as exc:
+        log_debug(f"Could not read from SecretService: {exc}")
+    return None
+
+
+def get_token_identity(token_path: Path, raw_token_str: str | None = None) -> dict:
+    if raw_token_str:
+        try:
+            data = json.loads(raw_token_str)
+        except Exception as exc:
+            return {"email": None, "status": f"invalid_json: {exc}"}
+    elif token_path.is_file():
+        try:
+            data = json.loads(token_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {"email": None, "status": f"invalid_json: {exc}"}
+    else:
+        return {"email": None, "status": "no_token"}
 
     email = None
     expiry = None
+    access_token = None
+
     if isinstance(data, dict):
         token = data.get("token")
         if isinstance(token, dict):
             expiry = token.get("expiry")
+            access_token = token.get("access_token")
             for key in ("id_token", "access_token"):
                 jwt = token.get(key)
                 if isinstance(jwt, str) and jwt.count(".") >= 2:
@@ -78,6 +130,14 @@ def get_token_identity(token_path: Path) -> dict:
                 claims = decode_jwt(jwt)
                 if claims and "email" in claims:
                     email = claims["email"]
+        if not access_token and "access_token" in data:
+            access_token = data.get("access_token")
+
+    if not email and access_token:
+        info = fetch_google_userinfo(access_token)
+        if info and "email" in info:
+            email = info["email"]
+
     return {"email": email, "expiry": expiry, "status": "authenticated" if email else "valid_token"}
 
 
@@ -98,7 +158,12 @@ def saved_token_path(name: str) -> Path:
 
 def cmd_list(args) -> int:
     ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
-    live_info = get_token_identity(live_token_path())
+    # Check live identity from keyring first, then file
+    keyring_token = get_keyring_antigravity_token()
+    if keyring_token:
+        live_info = get_token_identity(Path(""), raw_token_str=keyring_token)
+    else:
+        live_info = get_token_identity(live_token_path())
     live_email = live_info.get("email")
 
     files = sorted(ACCOUNTS_DIR.glob("*.json"))
@@ -123,12 +188,18 @@ def cmd_save(args) -> int:
     name = args.name
     ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
     target = saved_token_path(name)
-    src = live_token_path()
-    if not src.is_file():
-        print(f"Error: No active token found in {src}", file=sys.stderr)
-        return 1
 
-    shutil.copy2(src, target)
+    keyring_tok = get_keyring_antigravity_token()
+    if keyring_tok:
+        target.write_text(keyring_tok, encoding="utf-8")
+        log_debug("Saved token from system keyring")
+    else:
+        src = live_token_path()
+        if not src.is_file():
+            print(f"Error: No active token found in keyring or {src}", file=sys.stderr)
+            return 1
+        shutil.copy2(src, target)
+
     info = get_token_identity(target)
     print(f"Saved active login to account '{name}' ({info.get('email') or 'saved'})")
     return 0
@@ -187,8 +258,13 @@ def cmd_login(args) -> int:
 
 
 def cmd_whoami(args) -> int:
-    info = get_token_identity(live_token_path())
-    print(f"Live Token: {live_token_path()}")
+    keyring_tok = get_keyring_antigravity_token()
+    if keyring_tok:
+        info = get_token_identity(Path(""), raw_token_str=keyring_tok)
+        print("Source: System Keyring (SecretService)")
+    else:
+        info = get_token_identity(live_token_path())
+        print(f"Source File: {live_token_path()}")
     print(f"Email: {info.get('email') or '(none)'}")
     print(f"Status: {info.get('status')}")
     print(f"Expiry: {info.get('expiry') or 'N/A'}")

@@ -7,8 +7,10 @@ Features:
 - Isolated profile environments (~/.config/agy-profiles/<profile>).
 - Bypasses system GNOME keyring via `antigravity-keyring-unavailable` to guarantee
   per-profile OAuth credential isolation.
-- Automatically links ~/.gitconfig and ~/.ssh into profile home so git and ssh work seamlessly.
-- Provides commands: list, login, run, use (set default), whoami, import-current, remove.
+- Supports importing live credentials from system GNOME Keyring / SecretService.
+- Resolves Google account identity via JWT claims, local logs, and Google UserInfo API.
+- Automatically links ~/.gitconfig, ~/.ssh, and ~/.vimrc into profile home so git and ssh work seamlessly.
+- Commands: list, login, run, use (set default), whoami, import-current, remove.
 - Includes --debug flag for verbose diagnostics (timestamps, paths, environment).
 
 Usage:
@@ -18,7 +20,7 @@ Usage:
   agyp.py login <profile>                  # Authenticate a profile with Google OAuth
   agyp.py use <profile>                    # Set default profile
   agyp.py whoami [profile]                 # Show identity/email of profile
-  agyp.py import-current <profile>         # Copy current ~/.gemini login into profile
+  agyp.py import-current <profile>         # Import current live login (keyring/file) into profile
   agyp.py --debug <profile> ...            # Enable debug diagnostics
 """
 
@@ -27,7 +29,10 @@ import sys
 import json
 import base64
 import shutil
+import re
 import argparse
+import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -87,42 +92,84 @@ def decode_jwt_payload(jwt_str: str) -> dict | None:
         return None
 
 
-def extract_identity(token_path: Path) -> dict:
-    """Extract email and expiry from antigravity token file or oauth_creds.json."""
-    if not token_path.is_file():
-        return {"email": None, "expiry": None, "status": "no_token"}
-
+def fetch_google_userinfo(access_token: str) -> dict | None:
+    """Fetch user info from Google OAuth API using the access token."""
+    if not access_token:
+        return None
+    req = urllib.request.Request(
+        "https://www.googleapis.com/oauth2/v2/userinfo",
+        headers={"Authorization": f"Bearer {access_token}", "User-Agent": "agyp-manager"},
+    )
     try:
-        data = json.loads(token_path.read_text(encoding="utf-8"))
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+            log_debug(f"Fetched Google UserInfo: {data.get('email')}")
+            return data
     except Exception as exc:
-        return {"email": None, "expiry": None, "status": f"invalid_json: {exc}"}
+        log_debug(f"Failed to fetch Google UserInfo: {exc}")
+        return None
 
-    email = None
-    expiry = None
 
-    if isinstance(data, dict):
-        token = data.get("token")
-        if isinstance(token, dict):
-            expiry = token.get("expiry")
-            for field in ("id_token", "access_token"):
-                jwt = token.get(field)
-                if isinstance(jwt, str) and jwt.count(".") >= 2:
-                    claims = decode_jwt_payload(jwt)
-                    if claims and "email" in claims:
-                        email = claims["email"]
-                        break
-        # Fallback for oauth_creds.json format
-        if not email and "id_token" in data:
-            jwt = data.get("id_token")
-            if isinstance(jwt, str) and jwt.count(".") >= 2:
-                claims = decode_jwt_payload(jwt)
-                if claims and "email" in claims:
-                    email = claims["email"]
-        if not expiry and "expiry_date" in data:
-            expiry = str(data.get("expiry_date"))
+def get_keyring_antigravity_token() -> str | None:
+    """Extract live antigravity token stored in SecretService / GNOME Keyring."""
+    try:
+        import dbus  # type: ignore
 
-    status = "authenticated" if email else "valid_token"
-    return {"email": email, "expiry": expiry, "status": status}
+        bus = dbus.SessionBus()
+        service = bus.get_object("org.freedesktop.secrets", "/org/freedesktop/secrets")
+        collection = bus.get_object("org.freedesktop.secrets", "/org/freedesktop/secrets/aliases/default")
+        items = collection.Get(
+            "org.freedesktop.Secret.Collection", "Items", dbus_interface="org.freedesktop.DBus.Properties"
+        )
+        sec_svc = dbus.Interface(service, "org.freedesktop.Secret.Service")
+        _, session_path = sec_svc.OpenSession("plain", dbus.String("", variant_level=1))
+
+        for item_path in items:
+            item = bus.get_object("org.freedesktop.secrets", item_path)
+            attrs = item.Get(
+                "org.freedesktop.Secret.Item", "Attributes", dbus_interface="org.freedesktop.DBus.Properties"
+            )
+            if attrs.get("service") == "gemini" and attrs.get("username") == "antigravity":
+                secret_struct = item.GetSecret(session_path, dbus_interface="org.freedesktop.Secret.Item")
+                raw = bytes(secret_struct[2]).decode("utf-8")
+                log_debug("Successfully retrieved antigravity token from system SecretService keyring")
+                return raw
+    except Exception as exc:
+        log_debug(f"Could not read from SecretService: {exc}")
+    return None
+
+
+def search_logs_for_email(profile_home: Path) -> str | None:
+    """Scans CLI log files for authenticated email address."""
+    log_dirs = [
+        profile_home / ".gemini" / "antigravity-cli" / "log",
+        REAL_HOME / ".gemini" / "antigravity-cli" / "log",
+    ]
+    for ldir in log_dirs:
+        if not ldir.is_dir():
+            continue
+        try:
+            log_files = sorted(
+                (f for f in ldir.iterdir() if f.is_file() and f.name.endswith(".log")),
+                key=lambda f: f.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            continue
+
+        for log_file in log_files[:5]:
+            try:
+                content = log_file.read_text(encoding="utf-8", errors="ignore")
+                # Look for applyAuthResult: email=... or OAuth: authenticated successfully as ...
+                match = re.search(r"applyAuthResult:\s+email=([^,\s]+)", content)
+                if match:
+                    return match.group(1).strip()
+                match = re.search(r"OAuth:\s+authenticated successfully as\s+([^,\s]+)", content)
+                if match:
+                    return match.group(1).strip()
+            except OSError:
+                pass
+    return None
 
 
 def find_token_file(profile_home: Path) -> Path | None:
@@ -134,6 +181,80 @@ def find_token_file(profile_home: Path) -> Path | None:
         if candidate.is_file():
             return candidate
     return candidates[0]  # default expected location
+
+
+def extract_identity(profile_home: Path, token_path: Path | None = None) -> dict:
+    """Extract email, expiry, and status for a profile."""
+    if token_path is None:
+        token_path = find_token_file(profile_home)
+
+    cache_file = profile_home / ".gemini" / "antigravity-cli" / ".identity_cache.json"
+
+    if not token_path or not token_path.is_file():
+        return {"email": None, "expiry": None, "status": "no_token"}
+
+    try:
+        data = json.loads(token_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"email": None, "expiry": None, "status": f"invalid_json: {exc}"}
+
+    email = None
+    expiry = None
+    access_token = None
+
+    if isinstance(data, dict):
+        token = data.get("token")
+        if isinstance(token, dict):
+            expiry = token.get("expiry")
+            access_token = token.get("access_token")
+            for field in ("id_token", "access_token"):
+                jwt = token.get(field)
+                if isinstance(jwt, str) and jwt.count(".") >= 2:
+                    claims = decode_jwt_payload(jwt)
+                    if claims and "email" in claims:
+                        email = claims["email"]
+                        break
+        # Fallback for oauth_creds.json format if token_path is oauth_creds.json
+        if not email and "id_token" in data:
+            jwt = data.get("id_token")
+            if isinstance(jwt, str) and jwt.count(".") >= 2:
+                claims = decode_jwt_payload(jwt)
+                if claims and "email" in claims:
+                    email = claims["email"]
+        if not expiry and "expiry_date" in data:
+            expiry = str(data.get("expiry_date"))
+        if not access_token and "access_token" in data:
+            access_token = data.get("access_token")
+
+    # If email not yet found, check identity cache
+    if not email and cache_file.is_file():
+        try:
+            cached = json.loads(cache_file.read_text(encoding="utf-8"))
+            if cached.get("email"):
+                email = cached["email"]
+        except Exception:
+            pass
+
+    # If still not found, check CLI logs
+    if not email:
+        email = search_logs_for_email(profile_home)
+
+    # If still not found, query Google UserInfo API using access_token
+    if not email and access_token:
+        info = fetch_google_userinfo(access_token)
+        if info and "email" in info:
+            email = info["email"]
+
+    # Cache detected email
+    if email:
+        try:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(json.dumps({"email": email, "updated_at": datetime.now(timezone.utc).isoformat()}))
+        except Exception:
+            pass
+
+    status = "authenticated" if email else "valid_token"
+    return {"email": email, "expiry": expiry, "status": status}
 
 
 def ensure_profile_layout(profile_home: Path) -> None:
@@ -192,8 +313,7 @@ def cmd_list(args) -> int:
     print("-" * 75)
     for name in profiles:
         phome = get_profile_home(name)
-        token_path = find_token_file(phome)
-        info = extract_identity(token_path) if token_path else {"email": None, "status": "no_token"}
+        info = extract_identity(phome)
         is_default = "*" if name == default_prof else ""
         email_str = info.get("email") or "(not logged in)"
         status_str = info.get("status") or "unknown"
@@ -228,8 +348,7 @@ def cmd_whoami(args) -> int:
         print(f"Error: Profile '{name}' does not exist.", file=sys.stderr)
         return 1
 
-    token_path = find_token_file(phome)
-    info = extract_identity(token_path) if token_path else {"email": None, "status": "no_token"}
+    info = extract_identity(phome)
     print(f"Profile: {name}")
     print(f"Directory: {phome}")
     print(f"Email: {info.get('email') or 'Unknown / Not Logged In'}")
@@ -243,31 +362,44 @@ def cmd_import_current(args) -> int:
     phome = get_profile_home(name)
     ensure_profile_layout(phome)
 
-    real_gemini = REAL_HOME / ".gemini"
-    target_gemini = phome / ".gemini"
+    target_token = phome / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+    target_token.parent.mkdir(parents=True, exist_ok=True)
 
-    if not real_gemini.is_dir():
-        print("Error: No ~/.gemini directory found in your home directory.", file=sys.stderr)
-        return 1
+    # 1. Try exporting live token from SecretService keyring
+    keyring_token = get_keyring_antigravity_token()
+    if keyring_token:
+        target_token.write_text(keyring_token, encoding="utf-8")
+        log_debug(f"Exported live keyring token to {target_token}")
+    else:
+        # 2. Try file token
+        real_token = REAL_HOME / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+        if real_token.is_file():
+            shutil.copy2(real_token, target_token)
+            log_debug(f"Copied {real_token} -> {target_token}")
+        else:
+            # 3. Try legacy oauth_creds.json
+            legacy_creds = REAL_HOME / ".gemini" / "oauth_creds.json"
+            if legacy_creds.is_file():
+                shutil.copy2(legacy_creds, target_token)
+                log_debug(f"Copied {legacy_creds} -> {target_token}")
 
-    target_gemini.mkdir(parents=True, exist_ok=True)
-    # Copy oauth token / creds if found
-    for rel_path in [
-        "antigravity-cli/antigravity-oauth-token",
-        "oauth_creds.json",
-        "antigravity-cli/settings.json",
-    ]:
-        src = real_gemini / rel_path
-        dst = target_gemini / rel_path
-        if src.is_file():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-            log_debug(f"Copied {src} -> {dst}")
+    # Copy settings.json if present
+    settings_src = REAL_HOME / ".gemini" / "antigravity-cli" / "settings.json"
+    settings_dst = phome / ".gemini" / "antigravity-cli" / "settings.json"
+    if settings_src.is_file():
+        shutil.copy2(settings_src, settings_dst)
 
-    token_path = find_token_file(phome)
-    info = extract_identity(token_path) if token_path else {}
+    # Clean up old misplaced oauth_creds.json in profile if it exists
+    misplaced_creds = phome / ".gemini" / "oauth_creds.json"
+    if misplaced_creds.is_file() and target_token.is_file() and misplaced_creds != target_token:
+        try:
+            misplaced_creds.unlink()
+        except OSError:
+            pass
+
+    info = extract_identity(phome)
     email = info.get("email") or "imported profile"
-    print(f"Imported current ~/.gemini credentials into profile '{name}' ({email})")
+    print(f"Imported current live credentials into profile '{name}' ({email})")
     return 0
 
 
@@ -281,6 +413,11 @@ def cmd_login(args) -> int:
     if token_file.is_file():
         token_file.unlink()
         log_debug(f"Removed previous token {token_file}")
+
+    # Remove cached identity
+    cache_file = phome / ".gemini" / "antigravity-cli" / ".identity_cache.json"
+    if cache_file.is_file():
+        cache_file.unlink()
 
     agy_bin = find_agy_binary()
     print(f"Starting Google login session for profile '{name}'...")
@@ -298,8 +435,7 @@ def cmd_login(args) -> int:
         print(f"Error launching agy: {exc}", file=sys.stderr)
         return 1
 
-    token_path = find_token_file(phome)
-    info = extract_identity(token_path) if token_path else {}
+    info = extract_identity(phome)
     if info.get("email"):
         print(f"\n[OK] Successfully logged in as: {info.get('email')}")
         state = load_state()
@@ -307,7 +443,7 @@ def cmd_login(args) -> int:
             state["default_profile"] = name
             save_state(state)
     else:
-        print("\n[NOTE] Login session finished. Run 'agyp list' to check token status.")
+        print("\n[NOTE] Login session finished. Run 'agyp.py list' to check token status.")
     return 0
 
 
@@ -349,7 +485,7 @@ def main():
         return cmd_list(None)
     elif subcmd == "use":
         if len(argv) < 2:
-            print("Usage: agyp use <profile_name>", file=sys.stderr)
+            print("Usage: agyp.py use <profile_name>", file=sys.stderr)
             return 1
         parser = argparse.Namespace(profile=argv[1])
         return cmd_use(parser)
@@ -359,13 +495,13 @@ def main():
         return cmd_whoami(parser)
     elif subcmd == "login":
         if len(argv) < 2:
-            print("Usage: agyp login <profile_name>", file=sys.stderr)
+            print("Usage: agyp.py login <profile_name>", file=sys.stderr)
             return 1
         parser = argparse.Namespace(profile=argv[1])
         return cmd_login(parser)
     elif subcmd == "import-current":
         if len(argv) < 2:
-            print("Usage: agyp import-current <profile_name>", file=sys.stderr)
+            print("Usage: agyp.py import-current <profile_name>", file=sys.stderr)
             return 1
         parser = argparse.Namespace(profile=argv[1])
         return cmd_import_current(parser)
@@ -382,8 +518,8 @@ def main():
         default_prof = state.get("default_profile")
         if not default_prof:
             print("Error: No profile specified and no default profile set.", file=sys.stderr)
-            print("Specify a profile: agyp <profile_name> [args...]", file=sys.stderr)
-            print("Or set a default:   agyp use <profile_name>", file=sys.stderr)
+            print("Specify a profile: agyp.py <profile_name> [args...]", file=sys.stderr)
+            print("Or set a default:   agyp.py use <profile_name>", file=sys.stderr)
             return 1
         cmd_run(default_prof, argv)
 
