@@ -140,35 +140,30 @@ def get_keyring_antigravity_token() -> str | None:
 
 
 def search_logs_for_email(profile_home: Path) -> str | None:
-    """Scans CLI log files for authenticated email address."""
-    log_dirs = [
-        profile_home / ".gemini" / "antigravity-cli" / "log",
-        REAL_HOME / ".gemini" / "antigravity-cli" / "log",
-    ]
-    for ldir in log_dirs:
-        if not ldir.is_dir():
-            continue
-        try:
-            log_files = sorted(
-                (f for f in ldir.iterdir() if f.is_file() and f.name.endswith(".log")),
-                key=lambda f: f.stat().st_mtime,
-                reverse=True,
-            )
-        except OSError:
-            continue
+    """Scans profile's own CLI log files for authenticated email address."""
+    ldir = profile_home / ".gemini" / "antigravity-cli" / "log"
+    if not ldir.is_dir():
+        return None
+    try:
+        log_files = sorted(
+            (f for f in ldir.iterdir() if f.is_file() and f.name.endswith(".log")),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return None
 
-        for log_file in log_files[:5]:
-            try:
-                content = log_file.read_text(encoding="utf-8", errors="ignore")
-                # Look for applyAuthResult: email=... or OAuth: authenticated successfully as ...
-                match = re.search(r"applyAuthResult:\s+email=([^,\s]+)", content)
-                if match:
-                    return match.group(1).strip()
-                match = re.search(r"OAuth:\s+authenticated successfully as\s+([^,\s]+)", content)
-                if match:
-                    return match.group(1).strip()
-            except OSError:
-                pass
+    for log_file in log_files[:5]:
+        try:
+            content = log_file.read_text(encoding="utf-8", errors="ignore")
+            match = re.search(r"applyAuthResult:\s+email=([^,\s]+)", content)
+            if match:
+                return match.group(1).strip()
+            match = re.search(r"OAuth:\s+authenticated successfully as\s+([^,\s]+)", content)
+            if match:
+                return match.group(1).strip()
+        except OSError:
+            pass
     return None
 
 
@@ -226,24 +221,28 @@ def extract_identity(profile_home: Path, token_path: Path | None = None) -> dict
         if not access_token and "access_token" in data:
             access_token = data.get("access_token")
 
-    # If email not yet found, check identity cache
+    # 1. Directly query Google UserInfo API using access_token (authoritative ground truth)
+    if not email and access_token:
+        info = fetch_google_userinfo(access_token)
+        if info and "email" in info:
+            email = info["email"]
+            log_debug(f"Resolved email from Google UserInfo: {email}")
+
+    # 2. If offline/failed, fallback to profile's local identity cache
     if not email and cache_file.is_file():
         try:
             cached = json.loads(cache_file.read_text(encoding="utf-8"))
             if cached.get("email"):
                 email = cached["email"]
+                log_debug(f"Resolved email from cache: {email}")
         except Exception:
             pass
 
-    # If still not found, check CLI logs
+    # 3. If still not found, check profile's local CLI logs (never global logs)
     if not email:
         email = search_logs_for_email(profile_home)
-
-    # If still not found, query Google UserInfo API using access_token
-    if not email and access_token:
-        info = fetch_google_userinfo(access_token)
-        if info and "email" in info:
-            email = info["email"]
+        if email:
+            log_debug(f"Resolved email from profile logs: {email}")
 
     # Cache detected email
     if email:
@@ -361,6 +360,11 @@ def cmd_import_current(args) -> int:
     name = args.profile
     phome = get_profile_home(name)
     ensure_profile_layout(phome)
+
+    # Invalidate stale identity cache before importing new token
+    cache_file = phome / ".gemini" / "antigravity-cli" / ".identity_cache.json"
+    if cache_file.is_file():
+        cache_file.unlink()
 
     target_token = phome / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
     target_token.parent.mkdir(parents=True, exist_ok=True)
