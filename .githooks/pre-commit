@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+#
+# Generic pre-commit hook to prevent committing personal PII.
+# Patterns are loaded from local uncommitted file: .git/pii_patterns
+#
+
+set -euo pipefail
+
+GIT_DIR=$(git rev-parse --git-dir)
+PATTERN_FILE=""
+
+if [[ -f "$GIT_DIR/pii_patterns" ]]; then
+    PATTERN_FILE="$GIT_DIR/pii_patterns"
+elif [[ -f ".pii_patterns" ]]; then
+    PATTERN_FILE=".pii_patterns"
+elif [[ -f ".pii_patterns.local" ]]; then
+    PATTERN_FILE=".pii_patterns.local"
+fi
+
+if [[ -z "$PATTERN_FILE" ]]; then
+    echo "[WARNING] Anti-PII pattern file not found (.git/pii_patterns)." >&2
+    echo "To prevent accidental leakage of personal accounts/emails, create .git/pii_patterns:" >&2
+    echo '    echo "your_username|your_email@domain\\.com" > .git/pii_patterns' >&2
+    exit 0
+fi
+
+# Read non-empty, non-comment lines
+pattern=$(grep -v -E '^\s*(#|$)' "$PATTERN_FILE" | tr '\n' '|' | sed 's/|$//')
+
+if [[ -z "$pattern" ]]; then
+    exit 0
+fi
+
+# Check staged text files
+staged_files=$(git diff --cached --name-only --diff-filter=ACM)
+
+if [[ -z "$staged_files" ]]; then
+    exit 0
+fi
+
+found_pii=0
+
+while IFS= read -r file; do
+    if [[ -z "$file" || ! -f "$file" || "$file" == .githooks/* ]]; then
+        continue
+    fi
+
+    # Check added/modified lines in diff
+    matches=$(git diff --cached -U0 "$file" | grep -E "^\+[^+]" | grep -i -E "$pattern" || true)
+
+    if [[ -n "$matches" ]]; then
+        echo "================================================================================" >&2
+        echo "[SECURITY BLOCKED] Forbidden local PII pattern detected in staged changes in: $file" >&2
+        echo "Matches:" >&2
+        echo "$matches" >&2
+        echo "================================================================================" >&2
+        found_pii=1
+    fi
+done <<< "$staged_files"
+
+if [[ "$found_pii" -eq 1 ]]; then
+    echo "Commit aborted. Please sanitize personal information before committing." >&2
+    exit 1
+fi
+
+exit 0

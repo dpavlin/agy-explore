@@ -8,3 +8,4 @@ venv/
 ENV/
 *.log
 .DS_Store
+.pii_patterns*

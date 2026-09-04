@@ -1,0 +1,14 @@
+# Anti-PII Regex Patterns Template
+#
+# Copy this file to .git/pii_patterns:
+#   cp .githooks/pii_patterns.template .git/pii_patterns
+#
+# Add patterns (one per line) that identify your personal accounts, emails, or usernames.
+# The pre-commit and commit-msg hooks will scan staged diffs and commit messages against these patterns.
+#
+# Lines starting with '#' and empty lines are ignored.
+#
+# Examples:
+# my_username
+# my_email@example\.com
+# work_user|personal_user

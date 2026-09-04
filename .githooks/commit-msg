@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+#
+# Generic commit-msg hook to prevent personal PII in commit messages.
+# Patterns are loaded from local uncommitted file: .git/pii_patterns
+#
+
+set -euo pipefail
+
+GIT_DIR=$(git rev-parse --git-dir)
+PATTERN_FILE=""
+
+if [[ -f "$GIT_DIR/pii_patterns" ]]; then
+    PATTERN_FILE="$GIT_DIR/pii_patterns"
+elif [[ -f ".pii_patterns" ]]; then
+    PATTERN_FILE=".pii_patterns"
+elif [[ -f ".pii_patterns.local" ]]; then
+    PATTERN_FILE=".pii_patterns.local"
+fi
+
+if [[ -z "$PATTERN_FILE" ]]; then
+    exit 0
+fi
+
+pattern=$(grep -v -E '^\s*(#|$)' "$PATTERN_FILE" | tr '\n' '|' | sed 's/|$//')
+
+if [[ -z "$pattern" ]]; then
+    exit 0
+fi
+
+MSG_FILE="$1"
+if [[ -f "$MSG_FILE" ]]; then
+    matches=$(grep -i -E "$pattern" "$MSG_FILE" || true)
+    if [[ -n "$matches" ]]; then
+        echo "================================================================================" >&2
+        echo "[SECURITY BLOCKED] Forbidden local PII pattern detected in commit message:" >&2
+        echo "$matches" >&2
+        echo "================================================================================" >&2
+        echo "Commit aborted. Please sanitize personal information from the commit message." >&2
+        exit 1
+    fi
+fi
+
+exit 0
