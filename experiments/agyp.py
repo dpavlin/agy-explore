@@ -431,10 +431,13 @@ def cmd_login(args) -> int:
     env = os.environ.copy()
     env["HOME"] = str(phome)
     env["AGY_PROFILE"] = name
+    env["DBUS_SESSION_BUS_ADDRESS"] = ""
     env["PYTHON_KEYRING_BACKEND"] = "keyring.backends.null.Keyring"
 
     try:
-        ret = os.system(f'HOME="{phome}" "{agy_bin}"')
+        import subprocess
+        proc = subprocess.run([agy_bin], env=env)
+        ret = proc.returncode
     except Exception as exc:
         print(f"Error launching agy: {exc}", file=sys.stderr)
         return 1
@@ -459,9 +462,10 @@ def cmd_run(profile_name: str, agy_args: list[str]) -> int:
     env = os.environ.copy()
     env["HOME"] = str(phome)
     env["AGY_PROFILE"] = profile_name
+    env["DBUS_SESSION_BUS_ADDRESS"] = ""
     env["PYTHON_KEYRING_BACKEND"] = "keyring.backends.null.Keyring"
 
-    log_debug(f"Executing: HOME={phome} {agy_bin} {' '.join(agy_args)}")
+    log_debug(f"Executing: HOME={phome} DBUS_SESSION_BUS_ADDRESS='' {agy_bin} {' '.join(agy_args)}")
     sys.stdout.flush()
     sys.stderr.flush()
 

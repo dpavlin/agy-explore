@@ -97,7 +97,7 @@ case "$1" in
         rm -f "$PDIR/.gemini/antigravity-cli/antigravity-oauth-token"
         echo "Starting Google login session for profile '$PROFILE'..."
         echo "Sign in when prompted, then type /exit to complete."
-        HOME="$PDIR" AGY_PROFILE="$PROFILE" "$AGY_BIN"
+        HOME="$PDIR" AGY_PROFILE="$PROFILE" DBUS_SESSION_BUS_ADDRESS="" "$AGY_BIN"
         exit 0
         ;;
     --debug)
@@ -124,9 +124,10 @@ fi
 PDIR="$PROFILES_DIR/$PROFILE"
 ensure_profile "$PROFILE"
 
-log_debug "Executing: HOME=$PDIR $AGY_BIN $*"
+log_debug "Executing: HOME=$PDIR DBUS_SESSION_BUS_ADDRESS='' $AGY_BIN $*"
 export HOME="$PDIR"
 export AGY_PROFILE="$PROFILE"
+export DBUS_SESSION_BUS_ADDRESS=""
 export PYTHON_KEYRING_BACKEND="keyring.backends.null.Keyring"
 
 exec "$AGY_BIN" "$@"
