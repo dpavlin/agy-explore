@@ -86,6 +86,26 @@ agy-explore --restore <conversation_id>
 
 ---
 
+## Multi-Account Profile Management (`experiments/agyp.py`)
+
+This repository also includes a lightweight Google account profile manager and wrapper for `agy`:
+
+- **Zero Dependencies:** Pure Python standard library (`json`, `base64`, `os`, `pathlib`, `urllib`).
+- **Full Account Isolation:** Decouples sessions from the system desktop GNOME Keyring by overriding `DBUS_SESSION_BUS_ADDRESS=""` and isolating `$HOME` to `~/.config/agy-profiles/<name>`.
+- **Concurrent Safe:** Run multiple terminals with different Google logins simultaneously without token collision.
+
+```bash
+# Quick usage:
+./experiments/agyp.py list                  # List all accounts
+./experiments/agyp.py import-current work   # Import active login
+./experiments/agyp.py login personal        # Authenticate second account
+./experiments/agyp.py work models           # Run agy under 'work' account
+```
+
+See [experiments/README.md](experiments/README.md) for full documentation and empirical verification logs.
+
+---
+
 ## Technical Details
 
 - **Binary Backend:** Integrates natively with `~/.local/bin/agy` (Antigravity CLI).
