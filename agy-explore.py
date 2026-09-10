@@ -3,6 +3,8 @@ import json
 import os
 import sys
 import re
+import sqlite3
+import urllib.parse
 from datetime import datetime
 
 # ANSI Escape Codes for Beautiful Terminal Output
@@ -51,36 +53,186 @@ def print_help():
     print("  agy-explore 4ba35ed8-5ef9-497c-b6d9-1a6cb3e11056 | less -R")
     sys.exit(0)
 
+def clean_workspace_path(path_str):
+    if not path_str or not isinstance(path_str, str):
+        return None
+    p = path_str.strip().strip("\"'")
+    if p.startswith("file://"):
+        p = p[7:]
+    p = urllib.parse.unquote(p)
+    if len(p) > 1 and p.endswith("/"):
+        p = p[:-1]
+    return p
+
 def load_workspace_mappings():
-    """Reads history.jsonl to build a conversation-to-workspace mapping."""
-    history_path = os.path.join(BASE_DIR, "history.jsonl")
+    """Builds a conversation-to-workspace mapping from all available telemetry stores:
+    1. conversations/*.db (ground truth trajectory metadata)
+    2. conversation_summaries.db
+    3. cache/conversation_metadata.json
+    4. cache/last_conversations.json
+    5. history.jsonl
+    """
     mappings = {}
-    debug_log(f"Attempting to load workspace mappings from: {history_path}")
-    if not os.path.exists(history_path):
-        debug_log(f"History file not found at: {history_path}")
-        return mappings
-        
+
+    # 1. conversations/*.db (trajectory metadata blob)
+    convs_dir = os.path.join(BASE_DIR, "conversations")
+    if os.path.isdir(convs_dir):
+        db_count = 0
+        for f in os.listdir(convs_dir):
+            if not f.endswith(".db"):
+                continue
+            cid = f[:-3]
+            try:
+                conn = sqlite3.connect(os.path.join(convs_dir, f))
+                cur = conn.cursor()
+                cur.execute("SELECT data FROM trajectory_metadata_blob WHERE id = 'main'")
+                row = cur.fetchone()
+                if row and row[0]:
+                    m = re.search(rb"file://(/[^\x00-\x1f\x7f-\xff\s\"'\)]+)", row[0])
+                    if m:
+                        clean_ws = clean_workspace_path(m.group(1).decode("utf-8", "ignore"))
+                        if clean_ws:
+                            mappings[cid] = clean_ws
+                            db_count += 1
+            except Exception as ex:
+                debug_log(f"Failed to read trajectory metadata from {f}: {ex}")
+                continue
+        debug_log(f"Loaded {db_count} workspace mappings from conversations/*.db")
+
+    # 2. conversation_summaries.db
+    summaries_db = os.path.join(BASE_DIR, "conversation_summaries.db")
+    if os.path.exists(summaries_db):
+        try:
+            conn = sqlite3.connect(summaries_db)
+            cur = conn.cursor()
+            cur.execute("SELECT conversation_id, workspace_uris FROM conversation_summaries")
+            sum_count = 0
+            for cid, ws_json in cur.fetchall():
+                if cid not in mappings and ws_json:
+                    try:
+                        uris = json.loads(ws_json)
+                        if uris and isinstance(uris, list):
+                            clean_ws = clean_workspace_path(uris[0])
+                            if clean_ws:
+                                mappings[cid] = clean_ws
+                                sum_count += 1
+                    except Exception:
+                        m = re.search(r"file://(/[^\s\"'\]]+)", ws_json)
+                        if m:
+                            clean_ws = clean_workspace_path(m.group(1))
+                            if clean_ws:
+                                mappings[cid] = clean_ws
+                                sum_count += 1
+            debug_log(f"Loaded {sum_count} additional workspace mappings from conversation_summaries.db")
+        except Exception as ex:
+            debug_log(f"Failed to read conversation_summaries.db: {ex}")
+
+    # 3. cache/conversation_metadata.json
+    cache_meta_path = os.path.join(BASE_DIR, "cache", "conversation_metadata.json")
+    if os.path.exists(cache_meta_path):
+        try:
+            with open(cache_meta_path, "r", encoding="utf-8") as f:
+                cmd = json.load(f)
+                meta_count = 0
+                for cid, meta in cmd.get("conversations", {}).items():
+                    if cid not in mappings:
+                        uris = meta.get("summary", {}).get("WorkspaceURIs")
+                        if uris and isinstance(uris, list) and uris:
+                            clean_ws = clean_workspace_path(uris[0])
+                            if clean_ws:
+                                mappings[cid] = clean_ws
+                                meta_count += 1
+                debug_log(f"Loaded {meta_count} additional workspace mappings from conversation_metadata.json")
+        except Exception as ex:
+            debug_log(f"Failed to read conversation_metadata.json: {ex}")
+
+    # 4. cache/last_conversations.json
+    last_conv_path = os.path.join(BASE_DIR, "cache", "last_conversations.json")
+    if os.path.exists(last_conv_path):
+        try:
+            with open(last_conv_path, "r", encoding="utf-8") as f:
+                last_convs = json.load(f)
+                last_count = 0
+                for ws, cid in last_convs.items():
+                    if cid not in mappings:
+                        clean_ws = clean_workspace_path(ws)
+                        if clean_ws:
+                            mappings[cid] = clean_ws
+                            last_count += 1
+                debug_log(f"Loaded {last_count} additional workspace mappings from last_conversations.json")
+        except Exception as ex:
+            debug_log(f"Failed to read last_conversations.json: {ex}")
+
+    # 5. history.jsonl
+    history_path = os.path.join(BASE_DIR, "history.jsonl")
+    if os.path.exists(history_path):
+        try:
+            line_count = 0
+            hist_count = 0
+            with open(history_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    line_count += 1
+                    try:
+                        data = json.loads(line)
+                        cid = data.get("conversationId")
+                        workspace = data.get("workspace")
+                        if cid and workspace and cid not in mappings:
+                            clean_ws = clean_workspace_path(workspace)
+                            if clean_ws:
+                                mappings[cid] = clean_ws
+                                hist_count += 1
+                    except Exception:
+                        continue
+            debug_log(f"Loaded {hist_count} additional workspace mappings from {line_count} history records.")
+        except Exception as ex:
+            debug_log(f"Error loading workspace mappings from history.jsonl: {ex}")
+
+    debug_log(f"Total resolved workspace mappings: {len(mappings)}")
+    return mappings
+
+def infer_workspace_from_transcript(log_path):
+    """Infers the project workspace directory from early tool call paths in a transcript log."""
+    candidates = {}
+    debug_log(f"Attempting transcript heuristic workspace inference on: {log_path}")
     try:
-        line_count = 0
-        with open(history_path, "r", encoding="utf-8") as f:
-            for line in f:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            for i, line in enumerate(f):
+                if i > 50:
+                    break
                 if not line.strip():
                     continue
-                line_count += 1
                 try:
-                    data = json.loads(line)
-                    cid = data.get("conversationId")
-                    workspace = data.get("workspace")
-                    if cid and workspace:
-                        mappings[cid] = workspace
-                except Exception as ex:
-                    debug_log(f"JSON decode failed on history line {line_count}: {ex}")
+                    d = json.loads(line)
+                except Exception:
                     continue
-        debug_log(f"Successfully loaded {len(mappings)} mappings from {line_count} history records.")
-    except Exception as e:
-        debug_log(f"Error loading workspace mappings: {e}")
-        print(f"[!] Warning: failed to load workspace mappings: {e}")
-    return mappings
+                for tc in d.get("tool_calls", []):
+                    args = tc.get("args", {})
+                    # High confidence directory arguments
+                    for k in ["DirectoryPath", "Cwd", "SearchDirectory", "SearchPath"]:
+                        p = args.get(k)
+                        if p and isinstance(p, str):
+                            p = clean_workspace_path(p)
+                            if p and os.path.isabs(p) and not p.startswith("/tmp") and ".gemini" not in p:
+                                candidates[p] = candidates.get(p, 0) + 3
+                    # File path arguments (use parent dir)
+                    for k in ["AbsolutePath", "TargetFile"]:
+                        p = args.get(k)
+                        if p and isinstance(p, str):
+                            p = clean_workspace_path(p)
+                            if p and os.path.isabs(p) and not p.startswith("/tmp") and ".gemini" not in p:
+                                pdir = os.path.dirname(p)
+                                candidates[pdir] = candidates.get(pdir, 0) + 1
+    except Exception as ex:
+        debug_log(f"Error inferring workspace from transcript: {ex}")
+        pass
+
+    if candidates:
+        best_ws = max(candidates.items(), key=lambda x: x[1])[0]
+        debug_log(f"Heuristically inferred workspace '{best_ws}' from transcript {log_path} (candidates: {candidates})")
+        return best_ws
+    return None
 
 def format_duration(seconds):
     if seconds < 60:
@@ -236,7 +388,14 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
             debug_log(f"Skipping directory {uuid_str}: no transcript log found")
             continue
             
-        workspace = workspace_mappings.get(uuid_str, "Unknown Workspace")
+        workspace = workspace_mappings.get(uuid_str)
+        if not workspace or workspace == "Unknown Workspace":
+            inferred = infer_workspace_from_transcript(log_path)
+            if inferred:
+                workspace = inferred
+                workspace_mappings[uuid_str] = workspace
+            else:
+                workspace = "Unknown Workspace"
         
         # Filter by current directory if not showing all
         if not show_all:
@@ -592,35 +751,12 @@ def restore_conversation(conv_id):
     debug_log(f"Initial workspace mapping query: {workspace}")
     
     if not workspace:
-        # Let's fallback to search inside the transcript log for project path or user path
         log_path = os.path.join(brain_dir, ".system_generated", "logs", "transcript_full.jsonl")
         if not os.path.exists(log_path):
             log_path = os.path.join(brain_dir, ".system_generated", "logs", "transcript.jsonl")
-        debug_log(f"Mapping not found in history.jsonl. Performing fallback search in transcript: {log_path}")
+        debug_log(f"Mapping not found in metadata stores. Performing fallback search in transcript: {log_path}")
         if os.path.exists(log_path):
-            try:
-                line_idx = 0
-                with open(log_path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        if not line.strip():
-                            continue
-                        line_idx += 1
-                        try:
-                            data = json.loads(line)
-                        except json.JSONDecodeError as ex:
-                            debug_log(f"JSON decode failed on fallback scan line {line_idx}: {ex}")
-                            continue
-                        content = data.get("content", "")
-                        if "Workspace:" in content or "active workspaces" in content:
-                            # Try simple extraction
-                            match = re.search(r"Workspace:\s*([^\n\r]+)", content)
-                            if match:
-                                workspace = match.group(1).strip()
-                                debug_log(f"Matched workspace in transcript line {line_idx}: {workspace}")
-                                break
-            except Exception as e:
-                debug_log(f"Error scanning transcript for fallback workspace mapping: {e}")
-                pass
+            workspace = infer_workspace_from_transcript(log_path)
                 
     if not workspace:
         # Default fallback to home or ask user
