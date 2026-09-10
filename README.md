@@ -106,8 +106,10 @@ See [experiments/README.md](experiments/README.md) for full documentation and em
 
 ---
 
-## Technical Details
+## Technical Details & Architecture
 
 - **Binary Backend:** Integrates natively with `~/.local/bin/agy` (Antigravity CLI).
+- **Database Architecture:** Detailed specification of catalog (`conversation_summaries.db`) and session execution state (`conversations/<uuid>.db`) databases in [docs/database_architecture.md](docs/database_architecture.md).
+- **Grep Matching Engine:** Detailed specification of greedy coverage and snippet selection logic in [docs/grep_matching.md](docs/grep_matching.md).
 - **Log Files Location:** Reads from `~/.gemini/antigravity-cli/brain/<uuid>/.system_generated/logs/transcript.jsonl` and `~/.gemini/antigravity-cli/history.jsonl`.
 - **Cache File Location:** Manages pointers in `~/.gemini/antigravity-cli/cache/last_conversations.json`.
