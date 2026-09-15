@@ -801,6 +801,7 @@ def render_transcript(file_path, use_color=True, show_thoughts=True, show_tools=
     print(f"{CLR_BOLD}{CLR_CYAN}[*] Streaming transcript: {file_path}{CLR_RESET}\n")
     
     step_count = 0
+    pending_tool_calls = []
     with open(file_path, "r", encoding="utf-8") as f:
         for line_num, line in enumerate(f, 1):
             if not line.strip():
@@ -821,6 +822,7 @@ def render_transcript(file_path, use_color=True, show_thoughts=True, show_tools=
             tool_calls = step.get("tool_calls", [])
             
             if source == "USER_EXPLICIT" and step_type == "USER_INPUT":
+                pending_tool_calls.clear()
                 req = content
                 if "<USER_REQUEST>" in content:
                     req = content.split("<USER_REQUEST>")[-1].split("</USER_REQUEST>")[0].strip()
@@ -843,17 +845,37 @@ def render_transcript(file_path, use_color=True, show_thoughts=True, show_tools=
                         print(f"{CLR_BOLD}{CLR_GREEN}--------------------------------------------------------------------------------{CLR_RESET}")
                         print(f"{content}\n")
                         
-                    if show_tools and tool_calls:
-                        print(f"{CLR_BOLD}{CLR_MAGENTA}🛠️ TOOL CALLS REQUESTED:{CLR_RESET}")
+                    if tool_calls:
                         for tc in tool_calls:
-                            tc_name = tc.get("name")
-                            tc_args = json.dumps(tc.get("args"), indent=2)
-                            print(f"  {CLR_BOLD}Tool: {tc_name}{CLR_RESET}")
-                            print(f"  Arguments:\n{CLR_DIM}{tc_args}{CLR_RESET}\n")
+                            tc_name = tc.get("name") or "tool"
+                            pending_tool_calls.append(tc_name)
+                        if show_tools:
+                            print(f"{CLR_BOLD}{CLR_MAGENTA}🛠️ TOOL CALLS REQUESTED:{CLR_RESET}")
+                            for tc in tool_calls:
+                                tc_name = tc.get("name")
+                                tc_args = json.dumps(tc.get("args"), indent=2)
+                                print(f"  {CLR_BOLD}Tool: {tc_name}{CLR_RESET}")
+                                print(f"  Arguments:\n{CLR_DIM}{tc_args}{CLR_RESET}\n")
                             
-                elif show_tools and step_type in ["RUN_COMMAND", "VIEW_FILE", "LIST_DIRECTORY", "GREP_SEARCH", "COMMAND_OUTPUT"]:
-                    print(f"{CLR_BOLD}{CLR_CYAN}⚙️ TOOL EXECUTION OUTPUT | {step_type}{CLR_RESET}")
-                    print(f"{CLR_CYAN}{content}{CLR_RESET}\n")
+                elif step_type == "GENERIC" or step_type in [
+                    "RUN_COMMAND", "VIEW_FILE", "LIST_DIRECTORY", "GREP_SEARCH",
+                    "COMMAND_OUTPUT", "CODE_ACTION", "READ_URL_CONTENT",
+                    "SEARCH_WEB", "ASK_QUESTION"
+                ]:
+                    tool_label = pending_tool_calls.pop(0) if pending_tool_calls else step_type
+                    if show_tools:
+                        if step_type != "GENERIC" and step_type.lower() != tool_label.lower():
+                            display_label = f"{tool_label} ({step_type})"
+                        else:
+                            display_label = tool_label
+                        print(f"{CLR_BOLD}{CLR_CYAN}⚙️ TOOL EXECUTION OUTPUT | {display_label} | Timestamp: {time}{CLR_RESET}")
+                        print(f"{CLR_CYAN}{content}{CLR_RESET}\n")
+
+            elif source == "SYSTEM" and step_type == "ERROR_MESSAGE":
+                err_text = step.get("error") or content
+                if err_text:
+                    print(f"{CLR_BOLD}{CLR_RED}⚠️ SYSTEM ERROR | Timestamp: {time}{CLR_RESET}")
+                    print(f"{CLR_RED}{err_text}{CLR_RESET}\n")
     debug_log(f"Successfully rendered {step_count} transcript steps.")
 
 def main():
@@ -1024,4 +1046,15 @@ def main():
     sys.exit(1)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BrokenPipeError:
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+        except Exception:
+            pass
+        sys.exit(0)
+    except KeyboardInterrupt:
+        sys.exit(130)
+
