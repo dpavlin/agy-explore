@@ -6,6 +6,17 @@ import re
 import sqlite3
 import urllib.parse
 from datetime import datetime
+from pathlib import Path
+
+# Load agyp profile manager if available from experiments/
+try:
+    script_dir = os.path.dirname(os.path.realpath(__file__))
+    exp_dir = os.path.join(script_dir, "experiments")
+    if exp_dir not in sys.path:
+        sys.path.insert(0, exp_dir)
+    import agyp
+except Exception:
+    agyp = None
 
 # ANSI Escape Codes for Beautiful Terminal Output
 CLR_RESET = "\033[0m"
@@ -23,6 +34,46 @@ BASE_DIR = os.path.expanduser("~/.gemini/antigravity-cli")
 
 DEBUG_MODE = False
 
+def get_all_profiles():
+    if agyp:
+        try:
+            return agyp.list_all_profiles()
+        except Exception:
+            pass
+    profiles = ["default"]
+    pdir = Path(os.environ.get("AGY_PROFILES_DIR", "~/.config/agy-profiles")).expanduser()
+    if pdir.is_dir():
+        for p in sorted(pdir.iterdir()):
+            if p.is_dir() and not p.name.startswith("."):
+                profiles.append(p.name)
+    return profiles
+
+def get_profile_gemini_dir(profile_name):
+    if agyp:
+        try:
+            return Path(agyp.get_gemini_cli_dir(profile_name))
+        except Exception:
+            pass
+    if not profile_name or profile_name == "default":
+        return Path(os.path.expanduser("~/.gemini/antigravity-cli"))
+    pdir = Path(os.environ.get("AGY_PROFILES_DIR", "~/.config/agy-profiles")).expanduser()
+    return pdir / profile_name / ".gemini" / "antigravity-cli"
+
+def find_session_locations(conv_id):
+    if agyp:
+        try:
+            return agyp.find_session_locations(conv_id)
+        except Exception:
+            pass
+    found = []
+    for prof in get_all_profiles():
+        gdir = get_profile_gemini_dir(prof)
+        db_file = gdir / "conversations" / f"{conv_id}.db"
+        brain_dir = gdir / "brain" / conv_id
+        if db_file.exists() or brain_dir.exists():
+            found.append((prof, gdir))
+    return found
+
 def debug_log(msg):
     if DEBUG_MODE:
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
@@ -35,20 +86,20 @@ def print_help():
     print("  agy-explore                       # List conversations for the current directory")
     print("  agy-explore -a, --all             # List all conversations across all workspaces")
     print("  agy-explore <conversation_id>     # Print full conversation log")
-    print("  agy-explore --restore <conv_id>   # Make a conversation active in its workspace")
     print("  agy-explore <path_to_jsonl_file>  # Print specific JSONL file")
     print("\nOptions:")
-    print("  -a, --all      List all conversations (default shows only current directory)")
-    print("  -d, --debug    Enable detailed stderr telemetry logging")
-    print("  -v, --verbose  Set verbosity level (-v: show all stats/file details, -vv: show all stats plus full file contents)")
-    print("  --grep <words> Find conversations containing all specified words case-insensitively")
-    print("  --turn         Restrict --grep search to match all words within a single user-assistant turn")
-    print("  --search-all   Search all fields (thoughts, tool outputs) instead of just dialogue")
-    print("  --first <N>    Specify number of first prompts to show (default: 1)")
-    print("  --last <M>     Specify number of last prompts to show (default: 1)")
-    print("  --no-color     Disable ANSI color codes")
-    print("  --no-thoughts  Exclude internal assistant thinking processes")
-    print("  --no-tools     Exclude tool call/output logs")
+    print("  -a, --all               List all conversations (default shows only current directory)")
+    print("  -p, --profile <name>    Filter conversations to a specific profile (default: all profiles)")
+    print("  -d, --debug             Enable detailed stderr telemetry logging")
+    print("  -v, --verbose           Set verbosity level (-v: show all stats/file details, -vv: show all stats plus full file contents)")
+    print("  --grep <words>          Find conversations containing all specified words case-insensitively")
+    print("  --turn                  Restrict --grep search to match all words within a single user-assistant turn")
+    print("  --search-all            Search all fields (thoughts, tool outputs) instead of just dialogue")
+    print("  --first <N>             Specify number of first prompts to show (default: 1)")
+    print("  --last <M>              Specify number of last prompts to show (default: 1)")
+    print("  --no-color              Disable ANSI color codes")
+    print("  --no-thoughts           Exclude internal assistant thinking processes")
+    print("  --no-tools              Exclude tool call/output logs")
     print("\nExamples:")
     print("  agy-explore 4ba35ed8-5ef9-497c-b6d9-1a6cb3e11056 | less -R")
     sys.exit(0)
@@ -64,7 +115,7 @@ def clean_workspace_path(path_str):
         p = p[:-1]
     return p
 
-def load_workspace_mappings():
+def load_workspace_mappings(gemini_dir=None):
     """Builds a conversation-to-workspace mapping from all available telemetry stores:
     1. conversations/*.db (ground truth trajectory metadata)
     2. conversation_summaries.db
@@ -72,10 +123,13 @@ def load_workspace_mappings():
     4. cache/last_conversations.json
     5. history.jsonl
     """
+    if gemini_dir is None:
+        gemini_dir = BASE_DIR
+    gemini_dir = str(gemini_dir)
     mappings = {}
 
     # 1. conversations/*.db (trajectory metadata blob)
-    convs_dir = os.path.join(BASE_DIR, "conversations")
+    convs_dir = os.path.join(gemini_dir, "conversations")
     if os.path.isdir(convs_dir):
         db_count = 0
         for f in os.listdir(convs_dir):
@@ -97,10 +151,10 @@ def load_workspace_mappings():
             except Exception as ex:
                 debug_log(f"Failed to read trajectory metadata from {f}: {ex}")
                 continue
-        debug_log(f"Loaded {db_count} workspace mappings from conversations/*.db")
+        debug_log(f"Loaded {db_count} workspace mappings from {convs_dir}/*.db")
 
     # 2. conversation_summaries.db
-    summaries_db = os.path.join(BASE_DIR, "conversation_summaries.db")
+    summaries_db = os.path.join(gemini_dir, "conversation_summaries.db")
     if os.path.exists(summaries_db):
         try:
             conn = sqlite3.connect(summaries_db)
@@ -123,12 +177,12 @@ def load_workspace_mappings():
                             if clean_ws:
                                 mappings[cid] = clean_ws
                                 sum_count += 1
-            debug_log(f"Loaded {sum_count} additional workspace mappings from conversation_summaries.db")
+            debug_log(f"Loaded {sum_count} additional workspace mappings from {summaries_db}")
         except Exception as ex:
-            debug_log(f"Failed to read conversation_summaries.db: {ex}")
+            debug_log(f"Failed to read {summaries_db}: {ex}")
 
     # 3. cache/conversation_metadata.json
-    cache_meta_path = os.path.join(BASE_DIR, "cache", "conversation_metadata.json")
+    cache_meta_path = os.path.join(gemini_dir, "cache", "conversation_metadata.json")
     if os.path.exists(cache_meta_path):
         try:
             with open(cache_meta_path, "r", encoding="utf-8") as f:
@@ -142,12 +196,12 @@ def load_workspace_mappings():
                             if clean_ws:
                                 mappings[cid] = clean_ws
                                 meta_count += 1
-                debug_log(f"Loaded {meta_count} additional workspace mappings from conversation_metadata.json")
+                debug_log(f"Loaded {meta_count} additional workspace mappings from {cache_meta_path}")
         except Exception as ex:
-            debug_log(f"Failed to read conversation_metadata.json: {ex}")
+            debug_log(f"Failed to read {cache_meta_path}: {ex}")
 
     # 4. cache/last_conversations.json
-    last_conv_path = os.path.join(BASE_DIR, "cache", "last_conversations.json")
+    last_conv_path = os.path.join(gemini_dir, "cache", "last_conversations.json")
     if os.path.exists(last_conv_path):
         try:
             with open(last_conv_path, "r", encoding="utf-8") as f:
@@ -159,12 +213,12 @@ def load_workspace_mappings():
                         if clean_ws:
                             mappings[cid] = clean_ws
                             last_count += 1
-                debug_log(f"Loaded {last_count} additional workspace mappings from last_conversations.json")
+                debug_log(f"Loaded {last_count} additional workspace mappings from {last_conv_path}")
         except Exception as ex:
-            debug_log(f"Failed to read last_conversations.json: {ex}")
+            debug_log(f"Failed to read {last_conv_path}: {ex}")
 
     # 5. history.jsonl
-    history_path = os.path.join(BASE_DIR, "history.jsonl")
+    history_path = os.path.join(gemini_dir, "history.jsonl")
     if os.path.exists(history_path):
         try:
             line_count = 0
@@ -185,11 +239,11 @@ def load_workspace_mappings():
                                 hist_count += 1
                     except Exception:
                         continue
-            debug_log(f"Loaded {hist_count} additional workspace mappings from {line_count} history records.")
+            debug_log(f"Loaded {hist_count} additional workspace mappings from {line_count} history records in {history_path}.")
         except Exception as ex:
-            debug_log(f"Error loading workspace mappings from history.jsonl: {ex}")
+            debug_log(f"Error loading workspace mappings from {history_path}: {ex}")
 
-    debug_log(f"Total resolved workspace mappings: {len(mappings)}")
+    debug_log(f"Total resolved workspace mappings for {gemini_dir}: {len(mappings)}")
     return mappings
 
 def infer_workspace_from_transcript(log_path):
@@ -302,8 +356,10 @@ def highlight_text(text, words, highlight_color=CLR_BOLD + CLR_YELLOW, context_c
     except Exception:
         return text
 
-def get_generated_brain_files_detailed(session_uuid):
-    session_dir = os.path.join(BASE_DIR, "brain", session_uuid)
+def get_generated_brain_files_detailed(session_uuid, gemini_dir=None):
+    if gemini_dir is None:
+        gemini_dir = BASE_DIR
+    session_dir = os.path.join(str(gemini_dir), "brain", session_uuid)
     files_found = []
     if not os.path.isdir(session_dir):
         return files_found
@@ -348,285 +404,314 @@ def get_generated_brain_files_detailed(session_uuid):
             
     return sorted(files_found, key=lambda x: x["path"])
 
-def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, search_words=None, use_turn_matching=False, search_all=False):
-    brain_dir = os.path.join(BASE_DIR, "brain")
-    debug_log(f"Scanning brain directory: {brain_dir}")
-    if not os.path.isdir(brain_dir):
-        debug_log(f"Brain directory not found at: {brain_dir}")
-        print(f"{CLR_RED}[-] Brain directory not found at {brain_dir}{CLR_RESET}")
-        return
-    
-    dirs = []
-    for entry in os.listdir(brain_dir):
-        full_path = os.path.join(brain_dir, entry)
-        if os.path.isdir(full_path):
-            dirs.append(entry)
-    debug_log(f"Found {len(dirs)} candidate directories in brain store.")
-            
-    workspace_mappings = load_workspace_mappings()
-    
+def process_conversation_session(uuid_str, prof, gdir, workspace_mappings, cwd, show_all, search_words, use_turn_matching, search_all):
+    brain_dir = os.path.join(str(gdir), "brain")
+    log_path = os.path.join(brain_dir, uuid_str, ".system_generated", "logs", "transcript_full.jsonl")
+    if not os.path.exists(log_path):
+        log_path = os.path.join(brain_dir, uuid_str, ".system_generated", "logs", "transcript.jsonl")
+    if not os.path.exists(log_path):
+        debug_log(f"Skipping directory {uuid_str} in profile '{prof}': no transcript log found")
+        return None
+
+    workspace = workspace_mappings.get(uuid_str)
+    if not workspace or workspace == "Unknown Workspace":
+        inferred = infer_workspace_from_transcript(log_path)
+        if inferred:
+            workspace = inferred
+            workspace_mappings[uuid_str] = workspace
+        else:
+            workspace = "Unknown Workspace"
+
+    # Filter by current directory if not showing all
+    if not show_all:
+        norm_workspace = os.path.realpath(workspace) if workspace != "Unknown Workspace" else None
+        if norm_workspace != cwd:
+            debug_log(f"Filtering out session {uuid_str} in profile '{prof}': workspace '{norm_workspace}' does not match CWD '{cwd}'")
+            return None
+
+    debug_log(f"Processing session: {uuid_str} [profile: {prof}] (workspace: {workspace})")
+    mtime = os.path.getmtime(log_path)
+    mtime_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
+
+    user_prompts = []
+    start_time = None
+    end_time = None
+
+    tool_call_count = 0
+    thought_count = 0
+    total_steps = 0
+    tool_breakdown = {}
+
+    is_matched = True
+    try:
+        debug_log(f"Opening transcript log file: {log_path}")
+        with open(log_path, "r", encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+            total_steps = len(lines)
+            debug_log(f"Read {total_steps} log entries for session {uuid_str}")
+
+            steps_searchable = []
+            for idx, line in enumerate(lines):
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError as ex:
+                    debug_log(f"JSON decode failed on transcript line {idx + 1} of session {uuid_str}: {ex}")
+                    continue
+                created_at_str = data.get("created_at")
+
+                # Convert created_at to timestamp
+                t_val = None
+                if created_at_str and created_at_str != "N/A":
+                    try:
+                        clean_t = created_at_str.replace("Z", "").split("+")[0]
+                        t_val = datetime.fromisoformat(clean_t)
+                    except Exception:
+                        pass
+
+                if t_val:
+                    if start_time is None or t_val < start_time:
+                        start_time = t_val
+                    if end_time is None or t_val > end_time:
+                        end_time = t_val
+
+                source = data.get("source")
+                step_type = data.get("type")
+                content = data.get("content", "")
+
+                # Track statistics
+                if data.get("thinking"):
+                    thought_count += 1
+                if data.get("tool_calls"):
+                    t_calls = data.get("tool_calls")
+                    tool_call_count += len(t_calls)
+                    for tc in t_calls:
+                        tc_name = tc.get("name", "unknown")
+                        tool_breakdown[tc_name] = tool_breakdown.get(tc_name, 0) + 1
+                elif step_type in ["RUN_COMMAND", "VIEW_FILE", "LIST_DIRECTORY", "GREP_SEARCH", "COMMAND_OUTPUT"]:
+                    tool_call_count += 1
+                    tool_breakdown[step_type.lower()] = tool_breakdown.get(step_type.lower(), 0) + 1
+
+                if source == "USER_EXPLICIT" and step_type == "USER_INPUT":
+                    clean_content = content
+                    if "<USER_REQUEST>" in content:
+                        clean_content = content.split("<USER_REQUEST>")[-1].split("</USER_REQUEST>")[0].strip()
+
+                    clean_content = clean_content.replace("\n", " ").strip()
+
+                    user_prompts.append(clean_content)
+
+                # Extract searchable text for matching
+                steps_searchable.append((source, step_type, extract_searchable_text(data, search_all), idx + 1))
+
+            # Match check
+            matched_snippets = []
+            total_matches = 0
+            if search_words:
+                if use_turn_matching:
+                    turns_text = []
+                    current_turn_parts = []
+                    for src, st_type, text, step_num in steps_searchable:
+                        if src == "USER_EXPLICIT" and st_type == "USER_INPUT":
+                            if current_turn_parts:
+                                turns_text.append(" ".join(current_turn_parts))
+                                current_turn_parts = []
+                        current_turn_parts.append(text)
+                    if current_turn_parts:
+                        turns_text.append(" ".join(current_turn_parts))
+
+                    matched = False
+                    for turn_text in turns_text:
+                        turn_matched = True
+                        for word in search_words:
+                            if not re.search(rf"\b{re.escape(word)}", turn_text, re.IGNORECASE):
+                                turn_matched = False
+                                break
+                        if turn_matched:
+                            matched = True
+                            break
+                    is_matched = matched
+                else:
+                    session_text = " ".join([text for _, _, text, _ in steps_searchable])
+                    matched = True
+                    for word in search_words:
+                        if not re.search(rf"\b{re.escape(word)}", session_text, re.IGNORECASE):
+                            matched = False
+                            break
+                    is_matched = matched
+
+                # Extract matched snippets
+                if is_matched:
+                    candidates = []
+                    for src, st_type, text, step_num in steps_searchable:
+                        desc = ""
+                        if src == "USER_EXPLICIT" and st_type == "USER_INPUT":
+                            desc = "User Prompt"
+                        elif src == "MODEL":
+                            if st_type == "PLANNER_RESPONSE":
+                                desc = "Assistant Response"
+                            else:
+                                desc = "Assistant Thought"
+                        else:
+                            desc = st_type.replace("_", " ").title()
+
+                        lines = text.splitlines()
+                        for line in lines:
+                            line_stripped = line.strip()
+                            if not line_stripped:
+                                continue
+                            matched_words = {w for w in search_words if re.search(rf"\b{re.escape(w)}", line_stripped, re.IGNORECASE)}
+                            if matched_words:
+                                total_matches += 1
+                                candidates.append({
+                                    "step_num": step_num,
+                                    "desc": desc,
+                                    "line": line_stripped,
+                                    "matched_words": matched_words,
+                                    "index": len(candidates)
+                                })
+
+                    selected_candidates = []
+                    uncovered_words = set(search_words)
+
+                    # Pass 1: cover as many uncovered words as possible
+                    while len(selected_candidates) < 10 and uncovered_words:
+                        best_cand = None
+                        best_cover_count = 0
+                        for cand in candidates:
+                            if cand in selected_candidates:
+                                continue
+                            cover_count = len(cand["matched_words"] & uncovered_words)
+                            if cover_count > best_cover_count:
+                                best_cover_count = cover_count
+                                best_cand = cand
+                            elif cover_count == best_cover_count and best_cover_count > 0:
+                                if best_cand is None:
+                                    best_cand = cand
+                                else:
+                                    cand_total = len(cand["matched_words"])
+                                    best_total = len(best_cand["matched_words"])
+                                    if cand_total > best_total:
+                                        best_cand = cand
+                                    elif cand_total == best_total:
+                                        if cand["index"] < best_cand["index"]:
+                                            best_cand = cand
+
+                        if best_cand is None or best_cover_count == 0:
+                            break
+
+                        selected_candidates.append(best_cand)
+                        uncovered_words -= best_cand["matched_words"]
+
+                    # Pass 2: fill remaining slots up to 10
+                    if len(selected_candidates) < 10:
+                        for cand in candidates:
+                            if len(selected_candidates) >= 10:
+                                break
+                            if cand not in selected_candidates:
+                                selected_candidates.append(cand)
+
+                    # Sort chronologically
+                    selected_candidates.sort(key=lambda x: x["index"])
+
+                    for cand in selected_candidates:
+                        line_hl = highlight_text(cand["line"], search_words, CLR_BOLD + CLR_YELLOW, CLR_WHITE)
+                        matched_snippets.append(
+                            f"    {CLR_DIM}[Step {cand['step_num']} | {cand['desc']}]{CLR_RESET} {CLR_WHITE}{line_hl}{CLR_RESET}"
+                        )
+
+    except Exception as e:
+        debug_log(f"Error processing {uuid_str} in profile '{prof}': {e}")
+        print(f"[!] Error processing {uuid_str} in profile '{prof}': {e}")
+        is_matched = False
+
+    if not is_matched:
+        debug_log(f"Session {uuid_str} did not match grep filter.")
+        return None
+
+    duration_str = "N/A"
+    if start_time and end_time:
+        diff_sec = (end_time - start_time).total_seconds()
+        duration_str = format_duration(diff_sec)
+
+    brain_files = get_generated_brain_files_detailed(uuid_str, str(gdir))
+
+    return {
+        "uuid": uuid_str,
+        "profiles": [prof],
+        "gemini_dir": str(gdir),
+        "mtime": mtime,
+        "mtime_str": mtime_str,
+        "user_prompts": user_prompts,
+        "duration": duration_str,
+        "total_steps": total_steps,
+        "tool_calls": tool_call_count,
+        "thoughts": thought_count,
+        "workspace": workspace,
+        "brain_files": brain_files,
+        "tool_breakdown": tool_breakdown,
+        "matched_snippets": matched_snippets,
+        "total_matches": total_matches
+    }
+
+def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, search_words=None, use_turn_matching=False, search_all=False, profile_filter=None):
+    all_profiles = get_all_profiles()
+    if profile_filter:
+        profiles_to_scan = [p for p in all_profiles if p == profile_filter]
+        if not profiles_to_scan:
+            print(f"{CLR_RED}[-] Error: Profile '{profile_filter}' not found. Available profiles: {', '.join(all_profiles)}{CLR_RESET}")
+            return
+    else:
+        profiles_to_scan = all_profiles
+
     conversations = []
+    seen_conversations = {}
     cwd = os.path.realpath(os.getcwd())
     debug_log(f"Target query CWD path: {cwd}")
-    
+
     if show_all:
-        print(f"[*] Analyzing {len(dirs)} conversation log(s) across all workspaces...")
+        prof_info = f" (profile: {profile_filter})" if profile_filter else f" across {len(profiles_to_scan)} profile(s)"
+        print(f"[*] Analyzing conversation log(s) across all workspaces{prof_info}...")
     else:
-        print(f"[*] Analyzing conversation log(s) for current directory ({cwd})...")
+        prof_info = f" [profile: {profile_filter}]" if profile_filter else ""
+        print(f"[*] Analyzing conversation log(s) for current directory ({cwd}){prof_info}...")
         print(f"[*] (Use '-a' or '--all' to display all workspaces)")
-        
+
     if search_words:
         mode_str = "Turn-restricted" if use_turn_matching else "Session-wide"
         words_formatted = ", ".join([f"'{w}'" for w in search_words])
         print(f"[*] Filtered by --grep query: {words_formatted} (Matching Mode: {mode_str})")
-    
-    for uuid_str in dirs:
-        log_path = os.path.join(brain_dir, uuid_str, ".system_generated", "logs", "transcript_full.jsonl")
-        if not os.path.exists(log_path):
-            log_path = os.path.join(brain_dir, uuid_str, ".system_generated", "logs", "transcript.jsonl")
-        if not os.path.exists(log_path):
-            debug_log(f"Skipping directory {uuid_str}: no transcript log found")
+
+    for prof in profiles_to_scan:
+        gdir = get_profile_gemini_dir(prof)
+        brain_dir = os.path.join(str(gdir), "brain")
+        debug_log(f"Scanning profile '{prof}' brain directory: {brain_dir}")
+        if not os.path.isdir(brain_dir):
+            debug_log(f"Brain directory not found for profile '{prof}' at: {brain_dir}")
             continue
-            
-        workspace = workspace_mappings.get(uuid_str)
-        if not workspace or workspace == "Unknown Workspace":
-            inferred = infer_workspace_from_transcript(log_path)
-            if inferred:
-                workspace = inferred
-                workspace_mappings[uuid_str] = workspace
-            else:
-                workspace = "Unknown Workspace"
-        
-        # Filter by current directory if not showing all
-        if not show_all:
-            norm_workspace = os.path.realpath(workspace) if workspace != "Unknown Workspace" else None
-            if norm_workspace != cwd:
-                debug_log(f"Filtering out session {uuid_str}: workspace '{norm_workspace}' does not match CWD '{cwd}'")
+
+        dirs = []
+        for entry in os.listdir(brain_dir):
+            full_path = os.path.join(brain_dir, entry)
+            if os.path.isdir(full_path):
+                dirs.append(entry)
+        debug_log(f"Profile '{prof}': found {len(dirs)} candidate directories in brain store.")
+
+        workspace_mappings = load_workspace_mappings(gdir)
+
+        for uuid_str in dirs:
+            if uuid_str in seen_conversations:
+                if prof not in seen_conversations[uuid_str]["profiles"]:
+                    seen_conversations[uuid_str]["profiles"].append(prof)
                 continue
-                
-        debug_log(f"Processing session: {uuid_str} (workspace: {workspace})")
-        mtime = os.path.getmtime(log_path)
-        mtime_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
-        
-        user_prompts = []
-        start_time = None
-        end_time = None
-        
-        tool_call_count = 0
-        thought_count = 0
-        total_steps = 0
-        tool_breakdown = {}
-        
-        is_matched = True
-        try:
-            debug_log(f"Opening transcript log file: {log_path}")
-            with open(log_path, "r", encoding="utf-8") as f:
-                lines = [line.strip() for line in f if line.strip()]
-                total_steps = len(lines)
-                debug_log(f"Read {total_steps} log entries for session {uuid_str}")
-                
-                steps_searchable = []
-                for idx, line in enumerate(lines):
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError as ex:
-                        debug_log(f"JSON decode failed on transcript line {idx + 1} of session {uuid_str}: {ex}")
-                        continue
-                    created_at_str = data.get("created_at")
-                    
-                    # Convert created_at to timestamp
-                    t_val = None
-                    if created_at_str and created_at_str != "N/A":
-                        try:
-                            # Strip Z or +00:00 for simple parsing
-                            clean_t = created_at_str.replace("Z", "").split("+")[0]
-                            t_val = datetime.fromisoformat(clean_t)
-                        except Exception:
-                            pass
-                            
-                    if t_val:
-                        if start_time is None or t_val < start_time:
-                            start_time = t_val
-                        if end_time is None or t_val > end_time:
-                            end_time = t_val
-                            
-                    source = data.get("source")
-                    step_type = data.get("type")
-                    content = data.get("content", "")
-                    
-                    # Track statistics
-                    if data.get("thinking"):
-                        thought_count += 1
-                    if data.get("tool_calls"):
-                        t_calls = data.get("tool_calls")
-                        tool_call_count += len(t_calls)
-                        for tc in t_calls:
-                            tc_name = tc.get("name", "unknown")
-                            tool_breakdown[tc_name] = tool_breakdown.get(tc_name, 0) + 1
-                    elif step_type in ["RUN_COMMAND", "VIEW_FILE", "LIST_DIRECTORY", "GREP_SEARCH", "COMMAND_OUTPUT"]:
-                        tool_call_count += 1
-                        tool_breakdown[step_type.lower()] = tool_breakdown.get(step_type.lower(), 0) + 1
-                        
-                    if source == "USER_EXPLICIT" and step_type == "USER_INPUT":
-                        clean_content = content
-                        if "<USER_REQUEST>" in content:
-                            clean_content = content.split("<USER_REQUEST>")[-1].split("</USER_REQUEST>")[0].strip()
-                        
-                        clean_content = clean_content.replace("\n", " ").strip()
-                            
-                        user_prompts.append(clean_content)
-                        
-                    # Extract searchable text for matching
-                    steps_searchable.append((source, step_type, extract_searchable_text(data, search_all), idx + 1))
-                    
-                # Match check
-                matched_snippets = []
-                total_matches = 0
-                if search_words:
-                    if use_turn_matching:
-                        turns_text = []
-                        current_turn_parts = []
-                        for src, st_type, text, step_num in steps_searchable:
-                            if src == "USER_EXPLICIT" and st_type == "USER_INPUT":
-                                if current_turn_parts:
-                                    turns_text.append(" ".join(current_turn_parts))
-                                    current_turn_parts = []
-                            current_turn_parts.append(text)
-                        if current_turn_parts:
-                            turns_text.append(" ".join(current_turn_parts))
-                            
-                        matched = False
-                        for turn_text in turns_text:
-                            turn_matched = True
-                            for word in search_words:
-                                if not re.search(rf"\b{re.escape(word)}", turn_text, re.IGNORECASE):
-                                    turn_matched = False
-                                    break
-                            if turn_matched:
-                                matched = True
-                                break
-                        is_matched = matched
-                    else:
-                        session_text = " ".join([text for _, _, text, _ in steps_searchable])
-                        matched = True
-                        for word in search_words:
-                            if not re.search(rf"\b{re.escape(word)}", session_text, re.IGNORECASE):
-                                matched = False
-                                break
-                        is_matched = matched
-                        
-                    # Extract matched snippets
-                    if is_matched:
-                        candidates = []
-                        for src, st_type, text, step_num in steps_searchable:
-                            desc = ""
-                            if src == "USER_EXPLICIT" and st_type == "USER_INPUT":
-                                desc = "User Prompt"
-                            elif src == "MODEL":
-                                if st_type == "PLANNER_RESPONSE":
-                                    desc = "Assistant Response"
-                                else:
-                                    desc = "Assistant Thought"
-                            else:
-                                desc = st_type.replace("_", " ").title()
 
-                            lines = text.splitlines()
-                            for line in lines:
-                                line_stripped = line.strip()
-                                if not line_stripped:
-                                    continue
-                                matched_words = {w for w in search_words if re.search(rf"\b{re.escape(w)}", line_stripped, re.IGNORECASE)}
-                                if matched_words:
-                                    total_matches += 1
-                                    candidates.append({
-                                        "step_num": step_num,
-                                        "desc": desc,
-                                        "line": line_stripped,
-                                        "matched_words": matched_words,
-                                        "index": len(candidates)
-                                    })
+            conv_entry = process_conversation_session(
+                uuid_str, prof, gdir, workspace_mappings, cwd, show_all,
+                search_words, use_turn_matching, search_all
+            )
+            if conv_entry:
+                seen_conversations[uuid_str] = conv_entry
+                conversations.append(conv_entry)
 
-                        selected_candidates = []
-                        uncovered_words = set(search_words)
-                        
-                        # Pass 1: cover as many uncovered words as possible
-                        while len(selected_candidates) < 10 and uncovered_words:
-                            best_cand = None
-                            best_cover_count = 0
-                            for cand in candidates:
-                                if cand in selected_candidates:
-                                    continue
-                                cover_count = len(cand["matched_words"] & uncovered_words)
-                                if cover_count > best_cover_count:
-                                    best_cover_count = cover_count
-                                    best_cand = cand
-                                elif cover_count == best_cover_count and best_cover_count > 0:
-                                    if best_cand is None:
-                                        best_cand = cand
-                                    else:
-                                        cand_total = len(cand["matched_words"])
-                                        best_total = len(best_cand["matched_words"])
-                                        if cand_total > best_total:
-                                            best_cand = cand
-                                        elif cand_total == best_total:
-                                            if cand["index"] < best_cand["index"]:
-                                                best_cand = cand
-                                                
-                            if best_cand is None or best_cover_count == 0:
-                                break
-                                
-                            selected_candidates.append(best_cand)
-                            uncovered_words -= best_cand["matched_words"]
-                            
-                        # Pass 2: fill remaining slots up to 10
-                        if len(selected_candidates) < 10:
-                            for cand in candidates:
-                                if len(selected_candidates) >= 10:
-                                    break
-                                if cand not in selected_candidates:
-                                    selected_candidates.append(cand)
-                                    
-                        # Sort chronologically
-                        selected_candidates.sort(key=lambda x: x["index"])
-                        
-                        for cand in selected_candidates:
-                            line_hl = highlight_text(cand["line"], search_words, CLR_BOLD + CLR_YELLOW, CLR_WHITE)
-                            matched_snippets.append(
-                                f"    {CLR_DIM}[Step {cand['step_num']} | {cand['desc']}]{CLR_RESET} {CLR_WHITE}{line_hl}{CLR_RESET}"
-                            )
-                        
-        except Exception as e:
-            debug_log(f"Error processing {uuid_str}: {e}")
-            print(f"[!] Error processing {uuid_str}: {e}")
-            is_matched = False
-            
-        if not is_matched:
-            debug_log(f"Session {uuid_str} did not match grep filter.")
-            continue
-            
-        duration_str = "N/A"
-        if start_time and end_time:
-            diff_sec = (end_time - start_time).total_seconds()
-            duration_str = format_duration(diff_sec)
-            
-        brain_files = get_generated_brain_files_detailed(uuid_str)
-            
-        conversations.append({
-            "uuid": uuid_str,
-            "mtime": mtime,
-            "mtime_str": mtime_str,
-            "user_prompts": user_prompts,
-            "duration": duration_str,
-            "total_steps": total_steps,
-            "tool_calls": tool_call_count,
-            "thoughts": thought_count,
-            "workspace": workspace,
-            "brain_files": brain_files,
-            "tool_breakdown": tool_breakdown,
-            "matched_snippets": matched_snippets,
-            "total_matches": total_matches
-        })
-        
     # Sort by mtime descending
     conversations.sort(key=lambda x: x["mtime"], reverse=True)
     
@@ -636,9 +721,11 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
         return
     
     for idx, c in enumerate(conversations, 1):
+        profs_str = ", ".join(c.get("profiles", ["default"]))
         print(f"\n{CLR_BOLD}{CLR_BLUE}================================================================================{CLR_RESET}")
-        print(f"{CLR_BOLD}{CLR_GREEN}[#{idx}] Conversation ID: {c['uuid']}{CLR_RESET}")
+        print(f"{CLR_BOLD}{CLR_GREEN}[#{idx}] Conversation ID: {c['uuid']}{CLR_RESET} {CLR_DIM}(Profile: {profs_str}){CLR_RESET}")
         print(f"{CLR_BOLD}{CLR_BLUE}================================================================================{CLR_RESET}")
+        print(f"  {CLR_BOLD}Profile:          {CLR_RESET} {CLR_YELLOW}{profs_str}{CLR_RESET}")
         print(f"  {CLR_BOLD}Project Directory:{CLR_RESET} {CLR_CYAN}{c['workspace']}{CLR_RESET}")
         print(f"  {CLR_BOLD}Active Duration:  {CLR_RESET} {c['duration']} (Last Activity: {c['mtime_str']})")
         print(f"  {CLR_BOLD}Statistics:       {CLR_RESET} {c['total_steps']} total steps | {c['tool_calls']} tool calls executed | {c['thoughts']} reasoning cycles")
@@ -701,15 +788,20 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
             else:
                 print(f"  {CLR_BOLD}Last Prompts:     {CLR_RESET} {CLR_WHITE}\"N/A\"{CLR_RESET}")
         
-        # Output restore command instructions
-        print(f"  {CLR_BOLD}{CLR_YELLOW}Restore Session:{CLR_RESET}")
-        print(f"    1. Mark session active: {CLR_CYAN}agy-explore --restore {c['uuid']}{CLR_RESET}")
-        if c['workspace'] != "Unknown Workspace":
-            restore_cmd = f"cd {c['workspace']} && agy --conversation {c['uuid']}"
-            print(f"    2. Resume CLI session:  {CLR_BOLD}{restore_cmd}{CLR_RESET}")
+        # Output resume command instructions
+        primary_prof = c.get("profiles", ["default"])[0]
+        if primary_prof == "default":
+            cli_cmd = f"agy --conversation {c['uuid']}"
         else:
-            restore_cmd = f"agy --conversation {c['uuid']}"
-            print(f"    2. Resume CLI session:  {CLR_BOLD}{restore_cmd}{CLR_RESET}")
+            cli_cmd = f"agyp {primary_prof} --conversation {c['uuid']}"
+        if c['workspace'] != "Unknown Workspace":
+            resume_cmd = f"cd {c['workspace']} && {cli_cmd}"
+        else:
+            resume_cmd = cli_cmd
+        print(f"  {CLR_BOLD}{CLR_YELLOW}Resume CLI:{CLR_RESET}       {CLR_BOLD}{resume_cmd}{CLR_RESET}")
+        if primary_prof != "default":
+            alias_cmd = f"cd {c['workspace']} && agy-{primary_prof} --conversation {c['uuid']}" if c['workspace'] != "Unknown Workspace" else f"agy-{primary_prof} --conversation {c['uuid']}"
+            print(f"                    {CLR_DIM}(or: {alias_cmd}){CLR_RESET}")
             
         # Display Matched Snippets
         matched_snippets = c.get("matched_snippets", [])
@@ -735,62 +827,6 @@ def list_conversations(show_all=False, num_first=1, num_last=1, verbosity=0, sea
                     print(f"    {CLR_DIM}--------------------------------------------------------------------------------{CLR_RESET}")
             
     print("\n" + "="*80 + "\n")
-
-
-def restore_conversation(conv_id):
-    """Restores the given conversation ID to its associated workspace in the last_conversations cache."""
-    brain_dir = os.path.join(BASE_DIR, "brain", conv_id)
-    debug_log(f"Restoring conversation {conv_id}. Checking brain directory: {brain_dir}")
-    if not os.path.isdir(brain_dir):
-        debug_log(f"Error: brain directory not found for {conv_id}")
-        print(f"{CLR_RED}[- ] Error: conversation ID {conv_id} does not exist in brain store.{CLR_RESET}")
-        sys.exit(1)
-        
-    workspace_mappings = load_workspace_mappings()
-    workspace = workspace_mappings.get(conv_id)
-    debug_log(f"Initial workspace mapping query: {workspace}")
-    
-    if not workspace:
-        log_path = os.path.join(brain_dir, ".system_generated", "logs", "transcript_full.jsonl")
-        if not os.path.exists(log_path):
-            log_path = os.path.join(brain_dir, ".system_generated", "logs", "transcript.jsonl")
-        debug_log(f"Mapping not found in metadata stores. Performing fallback search in transcript: {log_path}")
-        if os.path.exists(log_path):
-            workspace = infer_workspace_from_transcript(log_path)
-                
-    if not workspace:
-        # Default fallback to home or ask user
-        workspace = os.path.expanduser("~")
-        debug_log(f"Fallback workspace matching failed. Defaulting workspace pointer to: {workspace}")
-        print(f"{CLR_YELLOW}[!] Warning: Workspace not mapped in logs. Defaulting pointer to {workspace}.{CLR_RESET}")
-        
-    cache_path = os.path.join(BASE_DIR, "cache", "last_conversations.json")
-    cache_data = {}
-    debug_log(f"Updating last_conversations cache file: {cache_path}")
-    if os.path.exists(cache_path):
-        try:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                cache_data = json.load(f)
-            debug_log(f"Loaded {len(cache_data)} existing cache pointers.")
-        except Exception as e:
-            debug_log(f"Error reading existing cache file: {e}")
-            print(f"[!] Warning: failed to parse cache: {e}")
-            
-    cache_data[workspace] = conv_id
-    
-    try:
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(cache_data, f, indent=2)
-        debug_log(f"Cache pointer mapped successfully: {workspace} -> {conv_id}")
-        print(f"{CLR_GREEN}[+] Success: Conversation {conv_id} has been marked active for workspace '{workspace}'.{CLR_RESET}")
-        print(f"{CLR_BOLD}To resume the CLI session, run the following commands:{CLR_RESET}")
-        print(f"  {CLR_CYAN}cd {workspace}{CLR_RESET}")
-        print(f"  {CLR_CYAN}agy --conversation {conv_id}{CLR_RESET}")
-    except Exception as e:
-        debug_log(f"Error writing cache pointer mapping: {e}")
-        print(f"{CLR_RED}[-] Failed to update last_conversations cache: {e}{CLR_RESET}")
-        sys.exit(1)
 
 def render_transcript(file_path, use_color=True, show_thoughts=True, show_tools=True):
     if not use_color:
@@ -938,8 +974,20 @@ def main():
             print(f"{CLR_RED}[-] Error: --last requires a numeric argument.{CLR_RESET}")
             sys.exit(1)
             
+    profile_filter = None
+    if "-p" in args or "--profile" in args:
+        try:
+            p_idx = args.index("-p") if "-p" in args else args.index("--profile")
+            if p_idx + 1 < len(args):
+                profile_filter = args[p_idx + 1]
+            else:
+                print(f"{CLR_RED}[-] Error: --profile requires a profile name.{CLR_RESET}")
+                sys.exit(1)
+        except ValueError:
+            pass
+
     debug_log(f"Starting agy-explore. Arguments: {args}")
-    debug_log(f"Options parsed - show_all: {show_all}, use_color: {use_color}, show_thoughts: {show_thoughts}, show_tools: {show_tools}, debug: {DEBUG_MODE}, num_first: {num_first}, num_last: {num_last}, verbosity: {verbosity}")
+    debug_log(f"Options parsed - show_all: {show_all}, profile: {profile_filter}, use_color: {use_color}, show_thoughts: {show_thoughts}, show_tools: {show_tools}, debug: {DEBUG_MODE}, num_first: {num_first}, num_last: {num_last}, verbosity: {verbosity}")
     
     # Parse grep options and search terms
     search_words = []
@@ -964,24 +1012,11 @@ def main():
             verbosity=verbosity,
             search_words=search_words,
             use_turn_matching=use_turn_matching,
-            search_all=search_all
+            search_all=search_all,
+            profile_filter=profile_filter
         )
         sys.exit(0)
-    
-    # Check for --restore option
-    if "--restore" in args:
-        try:
-            restore_idx = args.index("--restore")
-            if restore_idx + 1 < len(args):
-                conv_id = args[restore_idx + 1]
-                restore_conversation(conv_id)
-                sys.exit(0)
-            else:
-                print(f"{CLR_RED}[-] Error: --restore requires a conversation ID.{CLR_RESET}")
-                sys.exit(1)
-        except ValueError:
-            pass
-            
+
     # Robustly parse positional arguments while excluding options and their values
     pos_args = []
     skip_next = False
@@ -989,59 +1024,71 @@ def main():
         if skip_next:
             skip_next = False
             continue
-        if arg in ["--first", "--last", "--restore"]:
+        if arg in ["--first", "--last", "-p", "--profile"]:
             skip_next = True
             continue
         if arg.startswith("-"):
             continue
         pos_args.append(arg)
-    
+
     if not pos_args:
         debug_log("No positional arguments. Cataloging active conversations.")
-        list_conversations(show_all=show_all, num_first=num_first, num_last=num_last, verbosity=verbosity)
+        list_conversations(
+            show_all=show_all,
+            num_first=num_first,
+            num_last=num_last,
+            verbosity=verbosity,
+            profile_filter=profile_filter
+        )
         sys.exit(0)
-        
+
     target = pos_args[0]
-    
+
     # Check if target is a file path
     debug_log(f"Evaluating target argument: '{target}'")
     if os.path.exists(target):
         debug_log(f"Target '{target}' exists as a local file. Rendering transcript.")
         render_transcript(target, use_color, show_thoughts, show_tools)
         sys.exit(0)
-        
-    # Check if target is a UUID matching a brain conversation folder
-    brain_path = os.path.join(BASE_DIR, "brain", target, ".system_generated", "logs", "transcript_full.jsonl")
-    if not os.path.exists(brain_path):
-        brain_path = os.path.join(BASE_DIR, "brain", target, ".system_generated", "logs", "transcript.jsonl")
-    debug_log(f"Checking brain transcript path: '{brain_path}'")
-    if os.path.exists(brain_path):
-        debug_log(f"Target matches brain path. Rendering transcript: {brain_path}")
-        render_transcript(brain_path, use_color, show_thoughts, show_tools)
-        sys.exit(0)
-        
-    # Check if target is a UUID matching a conversations pb or db file
-    pb_path = os.path.join(BASE_DIR, "conversations", f"{target}.pb")
-    db_path = os.path.join(BASE_DIR, "conversations", f"{target}.db")
-    debug_log(f"Checking conversations path: '{pb_path}' or '{db_path}'")
-    if os.path.exists(pb_path) or os.path.exists(db_path):
-        found_path = pb_path if os.path.exists(pb_path) else db_path
-        debug_log(f"Target matches state file '{found_path}'. Redirecting.")
-        print(f"{CLR_YELLOW}[!] Found binary state file at {found_path}.{CLR_RESET}")
-        print(f"[*] Redirecting automatically to the JSONL log file under brain directory...")
-        redirect_path = os.path.join(BASE_DIR, "brain", target, ".system_generated", "logs", "transcript_full.jsonl")
-        if not os.path.exists(redirect_path):
-            redirect_path = os.path.join(BASE_DIR, "brain", target, ".system_generated", "logs", "transcript.jsonl")
-        debug_log(f"Redirecting to: {redirect_path}")
-        if os.path.exists(redirect_path):
-            render_transcript(redirect_path, use_color, show_thoughts, show_tools)
+
+    # Check if target matches a conversation across profiles
+    locations = find_session_locations(target)
+    if profile_filter:
+        locations = [(p, g) for p, g in locations if p == profile_filter]
+
+    for prof, gdir in locations:
+        gdir_str = str(gdir)
+        brain_path = os.path.join(gdir_str, "brain", target, ".system_generated", "logs", "transcript_full.jsonl")
+        if not os.path.exists(brain_path):
+            brain_path = os.path.join(gdir_str, "brain", target, ".system_generated", "logs", "transcript.jsonl")
+        debug_log(f"Checking profile '{prof}' brain transcript path: '{brain_path}'")
+        if os.path.exists(brain_path):
+            debug_log(f"Target matches brain path in profile '{prof}'. Rendering transcript: {brain_path}")
+            render_transcript(brain_path, use_color, show_thoughts, show_tools)
             sys.exit(0)
-        else:
-            debug_log(f"Redirect transcript file path does not exist: {redirect_path}")
-            print(f"{CLR_RED}[-] Error: Log file {redirect_path} does not exist.{CLR_RESET}")
-            sys.exit(1)
-            
-    print(f"{CLR_RED}[-] Error: Could not resolve '{target}' to an existing file or conversation ID.{CLR_RESET}")
+
+        # Check binary state files
+        pb_path = os.path.join(gdir_str, "conversations", f"{target}.pb")
+        db_path = os.path.join(gdir_str, "conversations", f"{target}.db")
+        debug_log(f"Checking profile '{prof}' conversations path: '{pb_path}' or '{db_path}'")
+        if os.path.exists(pb_path) or os.path.exists(db_path):
+            found_path = pb_path if os.path.exists(pb_path) else db_path
+            debug_log(f"Target matches state file '{found_path}' in profile '{prof}'. Redirecting.")
+            print(f"{CLR_YELLOW}[!] Found binary state file at {found_path} (Profile: {prof}).{CLR_RESET}")
+            print(f"[*] Redirecting automatically to the JSONL log file under brain directory...")
+            redirect_path = os.path.join(gdir_str, "brain", target, ".system_generated", "logs", "transcript_full.jsonl")
+            if not os.path.exists(redirect_path):
+                redirect_path = os.path.join(gdir_str, "brain", target, ".system_generated", "logs", "transcript.jsonl")
+            debug_log(f"Redirecting to: {redirect_path}")
+            if os.path.exists(redirect_path):
+                render_transcript(redirect_path, use_color, show_thoughts, show_tools)
+                sys.exit(0)
+            else:
+                debug_log(f"Redirect transcript file path does not exist: {redirect_path}")
+                print(f"{CLR_RED}[-] Error: Log file {redirect_path} does not exist.{CLR_RESET}")
+                sys.exit(1)
+
+    print(f"{CLR_RED}[-] Error: Could not resolve '{target}' to an existing file or conversation ID in any profile.{CLR_RESET}")
     print("Run without arguments to list all active conversations.")
     sys.exit(1)
 
