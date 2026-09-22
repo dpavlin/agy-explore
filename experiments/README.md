@@ -30,14 +30,17 @@ Google's `agy` is a compiled Go binary that uses `zalando/go-keyring`.
 
 ### How `agyp` Achieves Isolation
 1. **Isolated Home Directory:** Sets `HOME=~/.config/agy-profiles/<profile_name>`.
-2. **D-Bus Keyring Decoupling:** Sets `DBUS_SESSION_BUS_ADDRESS=""` in the environment passed to `agy`. In `agy`'s internal `keyring_detector_dbus.go`, an unset/empty D-Bus address triggers:
-   ```text
-   composite_token_storage.go:126] Using file-based token storage
-   ```
-   This forces `agy` to read and write tokens **strictly from the profile disk directory**:
-   ```text
-   ~/.config/agy-profiles/<profile>/.gemini/antigravity-cli/antigravity-oauth-token
-   ```
+2. **D-Bus Keyring Decoupling:** Sets `DBUS_SESSION_BUS_ADDRESS="disabled:"` and `XDG_RUNTIME_DIR=~/.config/agy-profiles/<profile_name>/.runtime`.
+   - *Why an empty `DBUS_SESSION_BUS_ADDRESS=""` is insufficient:* Go's `godbus/dbus` treats an empty string as unset and automatically falls back to `unix:path=$XDG_RUNTIME_DIR/bus` (`/run/user/1000/bus`), inadvertently connecting to the host desktop's GNOME Keyring.
+   - *Why `LD_PRELOAD` does not work:* Go compiles socket calls (`net.Dial`) into raw assembly Linux `SYSCALL` instructions (`0x0f 0x05`), completely bypassing dynamic linker `libc` wrappers.
+   - *The fix:* By explicitly setting `DBUS_SESSION_BUS_ADDRESS="disabled:"` and pointing `XDG_RUNTIME_DIR` to the profile's private `.runtime` directory, `godbus`'s probe fails immediately without falling back to `/run/user/1000/bus`. `agy`'s internal `keyring_detector_dbus.go` triggers:
+     ```text
+     composite_token_storage.go:123] Using file-based token storage because no D-Bus session bus detected
+     ```
+     This forces `agy` to read and write tokens **strictly from the profile disk directory**:
+     ```text
+     ~/.config/agy-profiles/<profile>/.gemini/antigravity-cli/antigravity-oauth-token
+     ```
 3. **Developer Symlinks:** Automatically symlinks `~/.gitconfig`, `~/.ssh`, and `~/.vimrc` into the profile directory so git commits, ssh credentials, and editors function seamlessly without leaking auth tokens.
 4. **Authoritative Identity Detection:** Queries Google's OAuth UserInfo API (`https://www.googleapis.com/oauth2/v2/userinfo`) using the profile's access token to verify the actual Google email address.
 

@@ -420,6 +420,12 @@ def extract_identity(profile_home: Path, token_path: Path | None = None) -> dict
 def ensure_profile_layout(profile_home: Path) -> None:
     """Sets up profile home directory, symlinks common configs, and disables keyring."""
     profile_home.mkdir(parents=True, exist_ok=True)
+    runtime_dir = profile_home / ".runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        runtime_dir.chmod(0o700)
+    except OSError:
+        pass
     cache_dir = profile_home / ".gemini" / "antigravity-cli" / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -781,10 +787,18 @@ def cmd_login(args) -> int:
     print("Authenticate in the browser when prompted, then exit agy (/exit) to finish setup.\n")
     sys.stdout.flush()
 
+    runtime_dir = phome / ".runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        runtime_dir.chmod(0o700)
+    except OSError:
+        pass
+
     env = os.environ.copy()
     env["HOME"] = str(phome)
     env["AGY_PROFILE"] = name
-    env["DBUS_SESSION_BUS_ADDRESS"] = ""
+    env["DBUS_SESSION_BUS_ADDRESS"] = "disabled:"
+    env["XDG_RUNTIME_DIR"] = str(runtime_dir)
     env["PYTHON_KEYRING_BACKEND"] = "keyring.backends.null.Keyring"
 
     try:
@@ -812,13 +826,21 @@ def cmd_run(profile_name: str, agy_args: list[str]) -> int:
     ensure_profile_layout(phome)
     agy_bin = find_agy_binary()
 
+    runtime_dir = phome / ".runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        runtime_dir.chmod(0o700)
+    except OSError:
+        pass
+
     env = os.environ.copy()
     env["HOME"] = str(phome)
     env["AGY_PROFILE"] = profile_name
-    env["DBUS_SESSION_BUS_ADDRESS"] = ""
+    env["DBUS_SESSION_BUS_ADDRESS"] = "disabled:"
+    env["XDG_RUNTIME_DIR"] = str(runtime_dir)
     env["PYTHON_KEYRING_BACKEND"] = "keyring.backends.null.Keyring"
 
-    log_debug(f"Executing: HOME={phome} DBUS_SESSION_BUS_ADDRESS='' {agy_bin} {' '.join(agy_args)}")
+    log_debug(f"Executing: HOME={phome} DBUS_SESSION_BUS_ADDRESS='disabled:' XDG_RUNTIME_DIR={runtime_dir} {agy_bin} {' '.join(agy_args)}")
     sys.stdout.flush()
     sys.stderr.flush()
 

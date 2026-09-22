@@ -30,6 +30,8 @@ ensure_profile() {
     local cache_dir="$pdir/.gemini/antigravity-cli/cache"
 
     mkdir -p "$cache_dir"
+    mkdir -p "$pdir/.runtime"
+    chmod 700 "$pdir/.runtime" 2>/dev/null || true
 
     # Disable system keyring to prevent cross-profile auth pollution
     touch "$cache_dir/antigravity-keyring-unavailable"
@@ -97,7 +99,7 @@ case "$1" in
         rm -f "$PDIR/.gemini/antigravity-cli/antigravity-oauth-token"
         echo "Starting Google login session for profile '$PROFILE'..."
         echo "Sign in when prompted, then type /exit to complete."
-        HOME="$PDIR" AGY_PROFILE="$PROFILE" DBUS_SESSION_BUS_ADDRESS="" "$AGY_BIN"
+        HOME="$PDIR" AGY_PROFILE="$PROFILE" DBUS_SESSION_BUS_ADDRESS="disabled:" XDG_RUNTIME_DIR="$PDIR/.runtime" "$AGY_BIN"
         exit 0
         ;;
     --debug)
@@ -124,10 +126,11 @@ fi
 PDIR="$PROFILES_DIR/$PROFILE"
 ensure_profile "$PROFILE"
 
-log_debug "Executing: HOME=$PDIR DBUS_SESSION_BUS_ADDRESS='' $AGY_BIN $*"
+log_debug "Executing: HOME=$PDIR DBUS_SESSION_BUS_ADDRESS='disabled:' XDG_RUNTIME_DIR=$PDIR/.runtime $AGY_BIN $*"
 export HOME="$PDIR"
 export AGY_PROFILE="$PROFILE"
-export DBUS_SESSION_BUS_ADDRESS=""
+export DBUS_SESSION_BUS_ADDRESS="disabled:"
+export XDG_RUNTIME_DIR="$PDIR/.runtime"
 export PYTHON_KEYRING_BACKEND="keyring.backends.null.Keyring"
 
 exec "$AGY_BIN" "$@"
