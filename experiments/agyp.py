@@ -10,18 +10,29 @@ Features:
 - Supports importing live credentials from system GNOME Keyring / SecretService.
 - Resolves Google account identity via JWT claims, local logs, and Google UserInfo API.
 - Automatically links ~/.gitconfig, ~/.ssh, and ~/.vimrc into profile home so git and ssh work seamlessly.
-- Commands: list, login, run, use (set default), whoami, import-current, remove.
+- Cross-profile session management: import, export, and live-share conversations.
+- Commands: list, login, run, use (set default), whoami, import-current, import, export, remove.
 - Includes --debug flag for verbose diagnostics (timestamps, paths, environment).
 
 Usage:
-  agyp.py <profile> [agy-options...]       # Run agy with specified profile
-  agyp.py [agy-options...]                 # Run agy with default active profile
-  agyp.py list                             # List profiles and Google account emails
-  agyp.py login <profile>                  # Authenticate a profile with Google OAuth
-  agyp.py use <profile>                    # Set default profile
-  agyp.py whoami [profile]                 # Show identity/email of profile
-  agyp.py import-current <profile>         # Import current live login (keyring/file) into profile
-  agyp.py --debug <profile> ...            # Enable debug diagnostics
+  agyp.py <profile> [agy-options...]                    # Run agy with specified profile
+  agyp.py [agy-options...]                              # Run agy with default active profile
+  agyp.py list                                          # List profiles and Google account emails
+  agyp.py login <profile>                               # Authenticate a profile with Google OAuth
+  agyp.py use <profile>                                 # Set default profile
+  agyp.py whoami [profile]                              # Show identity/email of profile
+  agyp.py import-current <profile>                      # Import current live login (keyring/file) into profile
+  agyp.py import [profile] <conv_id_or_archive>         # Import / share session into profile (default: symlink)
+  agyp.py export [source_prof] <conv_id> <target>       # Export session to profile or tarball (.tar.gz)
+  agyp.py <profile> import <conv_id_or_archive>         # Alias-friendly session import
+  agyp.py <profile> export <conv_id> <target>           # Alias-friendly session export
+  agyp.py --debug <profile> ...                         # Enable debug diagnostics
+
+Import & Export Options:
+  --link, --shared   Create symlinks for zero-disk live session sharing (default)
+  --copy             Clone session files independently
+  --from <profile>   Explicit source profile (default: auto-detected across all profiles)
+  -o, --output       Target archive path when exporting
 """
 
 import os
@@ -31,14 +42,21 @@ import base64
 import shutil
 import re
 import argparse
+import sqlite3
+import tarfile
 import urllib.request
 import urllib.error
+import pwd
 from datetime import datetime, timezone
 from pathlib import Path
 
-DEFAULT_PROFILES_DIR = Path.home() / ".config" / "agy-profiles"
+try:
+    REAL_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
+except Exception:
+    REAL_HOME = Path.home()
+
+DEFAULT_PROFILES_DIR = REAL_HOME / ".config" / "agy-profiles"
 DEFAULT_STATE_FILE = DEFAULT_PROFILES_DIR / ".state.json"
-REAL_HOME = Path.home()
 
 DEBUG = False
 
@@ -58,6 +76,149 @@ def get_profiles_dir() -> Path:
 
 def get_profile_home(profile_name: str) -> Path:
     return get_profiles_dir() / profile_name
+
+
+def get_gemini_cli_dir(profile_name: str | None) -> Path:
+    if not profile_name or profile_name == "default":
+        return REAL_HOME / ".gemini" / "antigravity-cli"
+    return get_profile_home(profile_name) / ".gemini" / "antigravity-cli"
+
+
+def list_all_profiles() -> list[str]:
+    names = ["default"]
+    pdir = get_profiles_dir()
+    if pdir.is_dir():
+        for p in sorted(pdir.iterdir()):
+            if p.is_dir() and not p.name.startswith("."):
+                names.append(p.name)
+    return names
+
+
+def find_session_locations(conv_id: str) -> list[tuple[str, Path]]:
+    """Returns list of (profile_name, gemini_cli_dir) where conv_id exists."""
+    found = []
+    for prof in list_all_profiles():
+        gdir = get_gemini_cli_dir(prof)
+        db_file = gdir / "conversations" / f"{conv_id}.db"
+        brain_dir = gdir / "brain" / conv_id
+        if db_file.exists() or brain_dir.exists():
+            found.append((prof, gdir))
+    return found
+
+
+def extract_session_workspace(gemini_dir: Path, conv_id: str) -> str | None:
+    """Attempts to find the workspace directory mapped to conv_id."""
+    # 1. Check last_conversations.json
+    last_conv_file = gemini_dir / "cache" / "last_conversations.json"
+    if last_conv_file.is_file():
+        try:
+            data = json.loads(last_conv_file.read_text(encoding="utf-8"))
+            for ws, cid in data.items():
+                if cid == conv_id:
+                    return ws
+        except Exception:
+            pass
+
+    # 2. Check trajectory_metadata_blob in conversations/<conv_id>.db
+    db_file = gemini_dir / "conversations" / f"{conv_id}.db"
+    if db_file.is_file():
+        try:
+            conn = sqlite3.connect(db_file)
+            cur = conn.cursor()
+            cur.execute("SELECT data FROM trajectory_metadata_blob WHERE id = 'main'")
+            row = cur.fetchone()
+            if row and row[0]:
+                m = re.search(rb"file://(/[^\x00-\x1f\x7f-\xff\s\"'\)]+)", row[0])
+                if m:
+                    ws = m.group(1).decode("utf-8", "ignore")
+                    if len(ws) > 1 and ws.endswith("/"):
+                        ws = ws[:-1]
+                    return ws
+        except Exception:
+            pass
+
+    # 3. Check transcript logs
+    for log_name in ("transcript_full.jsonl", "transcript.jsonl"):
+        log_path = gemini_dir / "brain" / conv_id / ".system_generated" / "logs" / log_name
+        if log_path.is_file():
+            try:
+                with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                    for i, line in enumerate(f):
+                        if i > 50:
+                            break
+                        if not line.strip():
+                            continue
+                        d = json.loads(line)
+                        for tc in d.get("tool_calls", []):
+                            args = tc.get("args", {})
+                            for k in ("DirectoryPath", "Cwd", "SearchDirectory", "SearchPath"):
+                                p = args.get(k)
+                                if p and isinstance(p, str) and os.path.isabs(p) and not p.startswith("/tmp") and ".gemini" not in p:
+                                    return p
+            except Exception:
+                pass
+    return None
+
+
+def clean_broken_session_links(target_profile: str, conv_id: str) -> None:
+    phome = get_profile_home(target_profile)
+    root_link = phome / conv_id
+    if root_link.is_symlink() and not root_link.exists():
+        try:
+            root_link.unlink()
+            log_debug(f"Removed broken root symlink: {root_link}")
+        except OSError:
+            pass
+
+    gdir = get_gemini_cli_dir(target_profile)
+    for sub in ["conversations", "brain", "annotations"]:
+        candidate = gdir / sub / (f"{conv_id}.db" if sub == "conversations" else f"{conv_id}.pbtxt" if sub == "annotations" else conv_id)
+        if candidate.is_symlink() and not candidate.exists():
+            try:
+                candidate.unlink()
+                log_debug(f"Removed broken symlink in {sub}: {candidate}")
+            except OSError:
+                pass
+
+
+def update_workspace_pointer(gemini_dir: Path, workspace: str, conv_id: str) -> None:
+    cache_dir = gemini_dir / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    last_conv_file = cache_dir / "last_conversations.json"
+    data = {}
+    if last_conv_file.is_file():
+        try:
+            data = json.loads(last_conv_file.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    data[workspace] = conv_id
+    last_conv_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    log_debug(f"Updated pointer in {last_conv_file}: {workspace} -> {conv_id}")
+
+
+def copy_summary_row(src_gemini: Path, dst_gemini: Path, conv_id: str) -> None:
+    src_db = src_gemini / "conversation_summaries.db"
+    dst_db = dst_gemini / "conversation_summaries.db"
+    if not src_db.is_file():
+        return
+    try:
+        src_conn = sqlite3.connect(src_db)
+        src_cur = src_conn.cursor()
+        src_cur.execute("SELECT * FROM conversation_summaries WHERE conversation_id = ?", (conv_id,))
+        row = src_cur.fetchone()
+        if not row:
+            return
+        cols = [d[0] for d in src_cur.description]
+        if dst_db.is_file():
+            dst_conn = sqlite3.connect(dst_db)
+            dst_cur = dst_conn.cursor()
+            placeholders = ", ".join(["?"] * len(cols))
+            col_names = ", ".join([f"`{c}`" for c in cols])
+            dst_cur.execute(f"INSERT OR REPLACE INTO conversation_summaries ({col_names}) VALUES ({placeholders})", row)
+            dst_conn.commit()
+            log_debug(f"Copied conversation summary row for {conv_id}")
+    except Exception as exc:
+        log_debug(f"Could not copy summary row: {exc}")
 
 
 def load_state() -> dict:
@@ -407,6 +568,198 @@ def cmd_import_current(args) -> int:
     return 0
 
 
+def do_import_session(
+    target_profile: str,
+    conv_id_or_archive: str,
+    source_profile: str | None = None,
+    copy_mode: bool = False,
+) -> int:
+    phome = get_profile_home(target_profile)
+    ensure_profile_layout(phome)
+    dst_gemini = get_gemini_cli_dir(target_profile)
+
+    # 1. Check if conv_id_or_archive is a tarball / archive file
+    archive_path = Path(conv_id_or_archive).expanduser().resolve()
+    if archive_path.is_file() and (archive_path.name.endswith(".tar.gz") or archive_path.name.endswith(".tgz") or archive_path.name.endswith(".tar")):
+        print(f"Extracting session archive '{archive_path.name}' into profile '{target_profile}'...")
+        try:
+            with tarfile.open(archive_path, "r:*") as tar:
+                tar.extractall(path=dst_gemini)
+            print(f"[OK] Successfully extracted session archive into {dst_gemini}")
+            return 0
+        except Exception as exc:
+            print(f"Error extracting archive: {exc}", file=sys.stderr)
+            return 1
+
+    # Strip URL/arg prefixes if provided (e.g. conversation://<uuid> or --conversation=<uuid>)
+    conv_id = conv_id_or_archive
+    if conv_id.startswith("--conversation="):
+        conv_id = conv_id.split("=", 1)[1]
+    elif conv_id.startswith("conversation://"):
+        conv_id = conv_id.replace("conversation://", "")
+    conv_id = conv_id.strip()
+
+    clean_broken_session_links(target_profile, conv_id)
+
+    # 2. Locate source session
+    if source_profile:
+        src_gemini = get_gemini_cli_dir(source_profile)
+        src_db = src_gemini / "conversations" / f"{conv_id}.db"
+        src_brain = src_gemini / "brain" / conv_id
+        if not src_db.exists() and not src_brain.exists():
+            print(f"Error: Conversation '{conv_id}' not found in source profile '{source_profile}'.", file=sys.stderr)
+            return 1
+        src_prof_name = source_profile
+    else:
+        locations = find_session_locations(conv_id)
+        viable = [loc for loc in locations if loc[0] != target_profile]
+        if not viable and locations:
+            viable = locations
+        if not viable:
+            print(f"Error: Conversation '{conv_id}' was not found in any profile or default store.", file=sys.stderr)
+            return 1
+        src_prof_name, src_gemini = viable[0]
+
+    src_db = src_gemini / "conversations" / f"{conv_id}.db"
+    src_brain = src_gemini / "brain" / conv_id
+    src_annot = src_gemini / "annotations" / f"{conv_id}.pbtxt"
+
+    if not src_db.exists() and not src_brain.exists():
+        print(f"Error: Conversation '{conv_id}' has neither database nor brain directory in '{src_prof_name}'.", file=sys.stderr)
+        return 1
+
+    # Ensure destination directories exist
+    (dst_gemini / "conversations").mkdir(parents=True, exist_ok=True)
+    (dst_gemini / "brain").mkdir(parents=True, exist_ok=True)
+    (dst_gemini / "annotations").mkdir(parents=True, exist_ok=True)
+    (dst_gemini / "cache").mkdir(parents=True, exist_ok=True)
+
+    dst_db = dst_gemini / "conversations" / f"{conv_id}.db"
+    dst_brain = dst_gemini / "brain" / conv_id
+    dst_annot = dst_gemini / "annotations" / f"{conv_id}.pbtxt"
+
+    mode_str = "Copied" if copy_mode else "Shared (Symlink)"
+
+    # Import DB
+    if src_db.exists():
+        if dst_db.is_symlink() or dst_db.exists():
+            if dst_db.is_dir():
+                shutil.rmtree(dst_db)
+            else:
+                dst_db.unlink()
+        if copy_mode:
+            shutil.copy2(src_db, dst_db)
+        else:
+            dst_db.symlink_to(src_db.resolve())
+        log_debug(f"Imported DB {src_db} -> {dst_db} ({mode_str})")
+
+    # Import Brain
+    if src_brain.exists():
+        if dst_brain.is_symlink() or dst_brain.exists():
+            if dst_brain.is_dir() and not dst_brain.is_symlink():
+                shutil.rmtree(dst_brain)
+            else:
+                dst_brain.unlink()
+        if copy_mode:
+            shutil.copytree(src_brain, dst_brain, symlinks=True, dirs_exist_ok=True)
+        else:
+            dst_brain.symlink_to(src_brain.resolve())
+        log_debug(f"Imported Brain {src_brain} -> {dst_brain} ({mode_str})")
+
+    # Import Annotations if available
+    if src_annot.exists():
+        if dst_annot.is_symlink() or dst_annot.exists():
+            dst_annot.unlink()
+        if copy_mode:
+            shutil.copy2(src_annot, dst_annot)
+        else:
+            dst_annot.symlink_to(src_annot.resolve())
+
+    # Detect workspace & set last_conversations pointer
+    workspace = extract_session_workspace(src_gemini, conv_id)
+    if workspace:
+        update_workspace_pointer(dst_gemini, workspace, conv_id)
+
+    copy_summary_row(src_gemini, dst_gemini, conv_id)
+
+    print(f"\n[+] Successfully imported conversation into profile '{target_profile}'!")
+    print(f"    Conversation ID: {conv_id}")
+    print(f"    Source:          {src_prof_name} ({src_gemini})")
+    print(f"    Mode:            {mode_str}")
+    if workspace:
+        print(f"    Workspace:       {workspace}")
+    print(f"\nTo resume this session:")
+    if workspace:
+        print(f"    cd {workspace} && agyp.py {target_profile} --conversation {conv_id}")
+        print(f"    (or alias: agy-{target_profile} --conversation {conv_id})")
+    else:
+        print(f"    agyp.py {target_profile} --conversation {conv_id}")
+    return 0
+
+
+def do_export_session(
+    source_profile: str | None,
+    conv_id: str,
+    target: str,
+    copy_mode: bool = False,
+) -> int:
+    # Clean conv_id
+    if conv_id.startswith("--conversation="):
+        conv_id = conv_id.split("=", 1)[1]
+    elif conv_id.startswith("conversation://"):
+        conv_id = conv_id.replace("conversation://", "")
+    conv_id = conv_id.strip()
+
+    # Determine if target is an archive file
+    target_path = Path(target).expanduser()
+    is_archive = target.endswith(".tar.gz") or target.endswith(".tgz") or target.endswith(".tar") or target.endswith(".zip")
+
+    # Locate source session
+    if source_profile:
+        src_gemini = get_gemini_cli_dir(source_profile)
+        src_prof_name = source_profile
+    else:
+        locations = find_session_locations(conv_id)
+        if not locations:
+            print(f"Error: Conversation '{conv_id}' was not found in any profile or default store.", file=sys.stderr)
+            return 1
+        src_prof_name, src_gemini = locations[0]
+
+    src_db = src_gemini / "conversations" / f"{conv_id}.db"
+    src_brain = src_gemini / "brain" / conv_id
+    src_annot = src_gemini / "annotations" / f"{conv_id}.pbtxt"
+
+    if not src_db.exists() and not src_brain.exists():
+        print(f"Error: Conversation '{conv_id}' not found in '{src_prof_name}'.", file=sys.stderr)
+        return 1
+
+    if is_archive:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"Exporting session '{conv_id}' from '{src_prof_name}' to archive: {target_path}...")
+        try:
+            with tarfile.open(target_path, "w:gz") as tar:
+                if src_db.is_file():
+                    tar.add(src_db, arcname=f"conversations/{conv_id}.db")
+                if src_brain.is_dir():
+                    tar.add(src_brain, arcname=f"brain/{conv_id}")
+                if src_annot.is_file():
+                    tar.add(src_annot, arcname=f"annotations/{conv_id}.pbtxt")
+            print(f"[OK] Successfully created session archive: {target_path}")
+            return 0
+        except Exception as exc:
+            print(f"Error creating archive: {exc}", file=sys.stderr)
+            return 1
+    else:
+        # Target is another profile
+        target_profile = target
+        return do_import_session(
+            target_profile=target_profile,
+            conv_id_or_archive=conv_id,
+            source_profile=src_prof_name,
+            copy_mode=copy_mode,
+        )
+
+
 def cmd_login(args) -> int:
     name = args.profile
     phome = get_profile_home(name)
@@ -513,6 +866,65 @@ def main():
             return 1
         parser = argparse.Namespace(profile=argv[1])
         return cmd_import_current(parser)
+    elif subcmd in ("import", "import-session"):
+        sub_args = argv[1:]
+        copy_mode = "--copy" in sub_args
+        from_prof = None
+        if "--from" in sub_args:
+            f_idx = sub_args.index("--from")
+            if f_idx + 1 < len(sub_args):
+                from_prof = sub_args[f_idx + 1]
+                sub_args = [a for i, a in enumerate(sub_args) if i != f_idx and i != f_idx + 1]
+        sub_args = [a for a in sub_args if a not in ("--copy", "--link", "--shared")]
+
+        if not sub_args:
+            print("Usage: agyp.py import [target_profile] <conversation_id_or_archive> [--copy] [--from <source>]", file=sys.stderr)
+            return 1
+
+        all_profs = list_all_profiles()
+        if len(sub_args) == 1:
+            state = load_state()
+            target_prof = state.get("default_profile")
+            if not target_prof:
+                print("Error: No profile specified and no default profile set.", file=sys.stderr)
+                print(f"Available profiles: {', '.join([p for p in all_profs if p != 'default'])}", file=sys.stderr)
+                return 1
+            conv_id = sub_args[0]
+        else:
+            target_prof = sub_args[0]
+            conv_id = sub_args[1]
+
+        return do_import_session(target_prof, conv_id, source_profile=from_prof, copy_mode=copy_mode)
+    elif subcmd in ("export", "export-session"):
+        sub_args = argv[1:]
+        copy_mode = "--copy" in sub_args
+        from_prof = None
+        if "-o" in sub_args or "--output" in sub_args:
+            o_idx = sub_args.index("-o") if "-o" in sub_args else sub_args.index("--output")
+            if o_idx + 1 < len(sub_args):
+                out_target = sub_args[o_idx + 1]
+                sub_args = [a for i, a in enumerate(sub_args) if i != o_idx and i != o_idx + 1]
+                sub_args.append(out_target)
+        if "--from" in sub_args:
+            f_idx = sub_args.index("--from")
+            if f_idx + 1 < len(sub_args):
+                from_prof = sub_args[f_idx + 1]
+                sub_args = [a for i, a in enumerate(sub_args) if i != f_idx and i != f_idx + 1]
+        sub_args = [a for a in sub_args if a not in ("--copy", "--link", "--shared")]
+
+        if len(sub_args) < 2:
+            print("Usage: agyp.py export [source_profile] <conversation_id> <target_profile_or_archive.tar.gz> [--copy]", file=sys.stderr)
+            return 1
+
+        if len(sub_args) == 2:
+            conv_id = sub_args[0]
+            target = sub_args[1]
+        else:
+            from_prof = sub_args[0]
+            conv_id = sub_args[1]
+            target = sub_args[2]
+
+        return do_export_session(from_prof, conv_id, target, copy_mode=copy_mode)
 
     # Check if first arg is an existing profile name or starts with '-'
     pdir = get_profiles_dir()
@@ -520,7 +932,36 @@ def main():
     if (pdir / candidate_profile).is_dir() or not candidate_profile.startswith("-"):
         profile = candidate_profile
         remaining_args = argv[1:]
-        cmd_run(profile, remaining_args)
+        if remaining_args and remaining_args[0] in ("import", "import-session"):
+            sub_args = remaining_args[1:]
+            copy_mode = "--copy" in sub_args
+            from_prof = None
+            if "--from" in sub_args:
+                f_idx = sub_args.index("--from")
+                if f_idx + 1 < len(sub_args):
+                    from_prof = sub_args[f_idx + 1]
+                    sub_args = [a for i, a in enumerate(sub_args) if i != f_idx and i != f_idx + 1]
+            sub_args = [a for a in sub_args if a not in ("--copy", "--link", "--shared")]
+            if not sub_args:
+                print(f"Usage: agyp.py {profile} import <conversation_id_or_archive> [--copy] [--from <source>]", file=sys.stderr)
+                return 1
+            return do_import_session(profile, sub_args[0], source_profile=from_prof, copy_mode=copy_mode)
+        elif remaining_args and remaining_args[0] in ("export", "export-session"):
+            sub_args = remaining_args[1:]
+            copy_mode = "--copy" in sub_args
+            if "-o" in sub_args or "--output" in sub_args:
+                o_idx = sub_args.index("-o") if "-o" in sub_args else sub_args.index("--output")
+                if o_idx + 1 < len(sub_args):
+                    out_target = sub_args[o_idx + 1]
+                    sub_args = [a for i, a in enumerate(sub_args) if i != o_idx and i != o_idx + 1]
+                    sub_args.append(out_target)
+            sub_args = [a for a in sub_args if a not in ("--copy", "--link", "--shared")]
+            if len(sub_args) < 2:
+                print(f"Usage: agyp.py {profile} export <conversation_id> <target_profile_or_archive> [--copy]", file=sys.stderr)
+                return 1
+            return do_export_session(profile, sub_args[0], sub_args[1], copy_mode=copy_mode)
+        else:
+            cmd_run(profile, remaining_args)
     else:
         state = load_state()
         default_prof = state.get("default_profile")
