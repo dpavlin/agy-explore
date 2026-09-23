@@ -116,44 +116,20 @@ def clean_workspace_path(path_str):
     return p
 
 def load_workspace_mappings(gemini_dir=None):
-    """Builds a conversation-to-workspace mapping from all available telemetry stores:
-    1. conversations/*.db (ground truth trajectory metadata)
-    2. conversation_summaries.db
-    3. cache/conversation_metadata.json
-    4. cache/last_conversations.json
-    5. history.jsonl
+    """Builds a conversation-to-workspace mapping from fast telemetry index stores:
+    1. conversation_summaries.db (SQLite bulk index)
+    2. cache/conversation_metadata.json (JSON cache)
+    3. cache/last_conversations.json (JSON cache)
+    4. history.jsonl (Streamed JSON log)
+    Note: Individual conversations/*.db files are queried lazily on-demand in
+    process_conversation_session to avoid scanning hundreds of SQLite files upfront.
     """
     if gemini_dir is None:
         gemini_dir = BASE_DIR
     gemini_dir = str(gemini_dir)
     mappings = {}
 
-    # 1. conversations/*.db (trajectory metadata blob)
-    convs_dir = os.path.join(gemini_dir, "conversations")
-    if os.path.isdir(convs_dir):
-        db_count = 0
-        for f in os.listdir(convs_dir):
-            if not f.endswith(".db"):
-                continue
-            cid = f[:-3]
-            try:
-                conn = sqlite3.connect(os.path.join(convs_dir, f))
-                cur = conn.cursor()
-                cur.execute("SELECT data FROM trajectory_metadata_blob WHERE id = 'main'")
-                row = cur.fetchone()
-                if row and row[0]:
-                    m = re.search(rb"file://(/[^\x00-\x1f\x7f-\xff\s\"'\)]+)", row[0])
-                    if m:
-                        clean_ws = clean_workspace_path(m.group(1).decode("utf-8", "ignore"))
-                        if clean_ws:
-                            mappings[cid] = clean_ws
-                            db_count += 1
-            except Exception as ex:
-                debug_log(f"Failed to read trajectory metadata from {f}: {ex}")
-                continue
-        debug_log(f"Loaded {db_count} workspace mappings from {convs_dir}/*.db")
-
-    # 2. conversation_summaries.db
+    # 1. conversation_summaries.db (fast bulk index)
     summaries_db = os.path.join(gemini_dir, "conversation_summaries.db")
     if os.path.exists(summaries_db):
         try:
@@ -414,6 +390,24 @@ def process_conversation_session(uuid_str, prof, gdir, workspace_mappings, cwd, 
         return None
 
     workspace = workspace_mappings.get(uuid_str)
+    if not workspace or workspace == "Unknown Workspace":
+        conv_db = os.path.join(str(gdir), "conversations", f"{uuid_str}.db")
+        if os.path.isfile(conv_db):
+            try:
+                conn = sqlite3.connect(conv_db)
+                cur = conn.cursor()
+                cur.execute("SELECT data FROM trajectory_metadata_blob WHERE id = 'main'")
+                row = cur.fetchone()
+                if row and row[0]:
+                    m = re.search(rb"file://(/[^\x00-\x1f\x7f-\xff\s\"'\)]+)", row[0])
+                    if m:
+                        clean_ws = clean_workspace_path(m.group(1).decode("utf-8", "ignore"))
+                        if clean_ws:
+                            workspace = clean_ws
+                            workspace_mappings[uuid_str] = clean_ws
+            except Exception as ex:
+                debug_log(f"Failed lazy trajectory metadata read for {uuid_str}: {ex}")
+
     if not workspace or workspace == "Unknown Workspace":
         inferred = infer_workspace_from_transcript(log_path)
         if inferred:
